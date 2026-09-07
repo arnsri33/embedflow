@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 
+from . import __version__
 from .compatibility.evaluate import evaluate_models, evaluate_with_native_rankings, load_qrels, load_queries
 from .compatibility.report import report_markdown, write_report
 from .config import (
@@ -644,7 +645,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             checks.append({"name": "target_fingerprint", "ok": True, "detail": config.target.fingerprint[:16]})
         except Exception as exc:
             checks.append({"name": "config", "ok": False, "detail": str(exc)})
-    optional_checks = {"faiss", "qdrant_client", "fastapi", "torch"}
+    optional_checks = {"faiss", "qdrant_client", "fastapi", "torch", "pytorch"}
     failed = [check for check in checks if not check["ok"] and check["name"] not in optional_checks]
     if args.json:
         _json({"checks": checks, "status": "FAIL" if failed else "PASS"})
@@ -1060,6 +1061,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="embedflow", description="Progressive embedding-model migration")
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init", help="create or validate an EmbedFlow YAML configuration"); init.add_argument("--config", default="embedflow.yaml"); init.add_argument("--source-model"); init.add_argument("--target-model"); init.add_argument("--documents"); init.add_argument("--index"); init.add_argument("--cache"); init.add_argument("--queries", help="optional JSONL probe queries to run during initialization"); init.add_argument("--kmax", type=int); init.add_argument("--backend", choices=["faiss", "qdrant"], default="faiss"); init.add_argument("--dimension", type=int, default=64); init.add_argument("--build-index", action="store_true"); init.add_argument("--device", default="cpu"); init.add_argument("--demo", action="store_true"); init.set_defaults(func=cmd_init)
     migrate_cmd = sub.add_parser("migrate", help="connect an existing index and start progressive migration")

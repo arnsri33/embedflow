@@ -1,0 +1,127 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+# The build and test jobs receive read-only repository access. Only the
+# publishing job receives an OIDC token, and it is protected by the `pypi`
+# environment configured in GitHub and PyPI.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install package and development dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check .
+      - name: Test
+        run: pytest -q
+
+  release-gate:
+    name: Full release gate
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package and release tooling
+        run: python -m pip install -e ".[dev,faiss,qdrant,dashboard]"
+      - name: Run full release gate
+        run: python scripts/release_gate.py
+
+  build:
+    name: Build and inspect distributions
+    needs: [test, release-gate]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install packaging tools
+        run: python -m pip install build twine
+      - name: Verify release tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          tag = os.environ["RELEASE_TAG"]
+          expected = f"v{version}"
+          if tag != expected:
+              raise SystemExit(f"release tag {tag!r} does not match package version {version!r}; expected {expected!r}")
+          print(f"release tag {tag} matches package version {version}")
+          PY
+      - name: Build wheel and source distribution
+        run: python -m build
+      - name: Validate package metadata
+        run: python -m twine check dist/*
+      - name: Smoke-test the built wheel
+        run: |
+          python -m venv /tmp/embedflow-release-wheel
+          /tmp/embedflow-release-wheel/bin/python -m pip install --upgrade pip
+          /tmp/embedflow-release-wheel/bin/python -m pip install dist/*.whl
+          cd /tmp
+          /tmp/embedflow-release-wheel/bin/python -c "import embedflow; assert embedflow.__version__ == '0.1.0'; print(embedflow.__version__)"
+          /tmp/embedflow-release-wheel/bin/embedflow --help
+          /tmp/embedflow-release-wheel/bin/embedflow registry list
+      - name: Store distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    if: github.event.release.prerelease == false
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/embedflow
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download tested distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+      - name: Publish distributions with Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1

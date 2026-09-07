@@ -410,12 +410,15 @@ def main() -> int:
             interpreters[version] = "SKIP"
 
     failures = [check for check in CHECKS if check.status == "FAIL"]
+    commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, text=True, capture_output=True).stdout.strip() or "unknown"
+    dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, text=True, capture_output=True).stdout.strip())
+    commit_label = f"{commit} (working tree has uncommitted changes)" if dirty else commit
     report_lines = [
         "# EmbedFlow v0.1.0 Release Test Report", "",
         f"- Generated: {time.strftime('%Y-%m-%d %H:%M:%S %z')}",
         f"- Python running gate: {sys.version.split()[0]}",
         "- Repository: `embedflow` (local release checkout)",
-        f"- Git commit: {subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], cwd=ROOT, text=True, capture_output=True).stdout.strip() or 'uncommitted'}",
+        f"- Git commit: {commit_label}",
         "", "## Gate", "", f"**RELEASE GATE: {'FAIL' if failures else 'PASS'}**", "",
         "## Check matrix", "", "| Check | Status | Detail | Seconds |", "|---|---|---|---:|",
     ]

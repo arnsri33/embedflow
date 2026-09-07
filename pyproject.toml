@@ -5,8 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "embedflow"
 version = "0.1.0"
-description = "Progressive embedding-model migration over an existing vector index"
-readme = "README.md"
+description = "Progressive embedding-model migration over existing vector indexes."
+readme = "README_PYPI.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -50,6 +50,8 @@ dev = ["pytest>=8.0", "ruff>=0.5", "build>=1.2"]
 embedflow = "embedflow.cli:main"
 
 [project.urls]
+Homepage = "https://embedflow.org"
+Repository = "https://github.com/arnsri33/embedflow"
 Documentation = "https://github.com/arnsri33/embedflow#readme"
 Issues = "https://github.com/arnsri33/embedflow/issues"
 

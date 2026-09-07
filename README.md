@@ -34,7 +34,7 @@ flowchart LR
 
 Measured candidate gap from the registry:
 
-![Candidate gap on the 1M-document Natural Questions evaluation](docs/assets/candidate-gap-example.svg)
+![Candidate gap on the 1M-document Natural Questions evaluation](https://raw.githubusercontent.com/arnsri33/embedflow/main/docs/assets/candidate-gap-example.svg)
 
 ## Install
 
@@ -48,8 +48,9 @@ python -m pip install -e ".[faiss,dashboard]"
 ```
 
 Qdrant and model-runtime extras are documented in
-[`docs/installation.md`](docs/installation.md). The requirements files are
-also available for conventional installs.
+[`docs/installation.md`](https://github.com/arnsri33/embedflow/blob/main/docs/installation.md).
+The requirements files are also available for conventional installs.
+For the model-backed command below, install `.[faiss,models,dashboard]`.
 
 ## Try it
 
@@ -148,7 +149,8 @@ Selected core records (nDCG@10, `G(50)`):
 Exact corpus and contract matches can reuse canonical results with
 `--use-registry`. Matching contracts on a different corpus are reported as
 prior evidence and still trigger current-corpus validation. See
-[`docs/registry.md`](docs/registry.md) for matching and provenance details.
+[`docs/registry.md`](https://github.com/arnsri33/embedflow/blob/main/docs/registry.md)
+for matching and provenance details.
 
 ## Research
 
@@ -169,9 +171,9 @@ Natural Questions scale experiments through 1M documents. T2-v1 is the frozen
 finite-pool diagnostic used before a native target index exists. ANN fidelity
 is measured separately and is `UNKNOWN` until an exact reference is supplied.
 
-- [Concepts](docs/concepts.md)
-- [Methodology](docs/methodology.md)
-- [Known evidence registry](docs/registry.md)
+- [Concepts](https://github.com/arnsri33/embedflow/blob/main/docs/concepts.md)
+- [Methodology](https://github.com/arnsri33/embedflow/blob/main/docs/methodology.md)
+- [Known evidence registry](https://github.com/arnsri33/embedflow/blob/main/docs/registry.md)
 - [Paper: *EmbedFlow: Upgrading Legacy Embeddings Without Full Upfront Re-Embedding*](#citation)
 
 ## Integrations
@@ -183,9 +185,9 @@ is measured separately and is `UNKNOWN` until an exact reference is supplied.
 
 Backend-specific setup and examples:
 
-- [FAISS](docs/integrations/faiss.md)
-- [Qdrant](docs/integrations/qdrant.md)
-- [Adding a backend](CONTRIBUTING.md)
+- [FAISS](https://github.com/arnsri33/embedflow/blob/main/docs/integrations/faiss.md)
+- [Qdrant](https://github.com/arnsri33/embedflow/blob/main/docs/integrations/qdrant.md)
+- [Adding a backend](https://github.com/arnsri33/embedflow/blob/main/CONTRIBUTING.md)
 
 ## CLI
 
@@ -199,21 +201,23 @@ embedflow economics --corpus-size 1000000000 --docs-per-second 106.98 --gpu-pric
 embedflow doctor --config ./embedflow.yaml
 ```
 
-The full command reference is in [`docs/cli.md`](docs/cli.md). The FastAPI
+The full command reference is in
+[`docs/cli.md`](https://github.com/arnsri33/embedflow/blob/main/docs/cli.md). The FastAPI
 service exposes health, status, search, analysis, prewarming, metrics, and
-OpenAPI documentation; see [`docs/api.md`](docs/api.md).
+OpenAPI documentation; see
+[`docs/api.md`](https://github.com/arnsri33/embedflow/blob/main/docs/api.md).
 
 ## Documentation
 
-- [Installation and extras](docs/installation.md)
-- [Quickstart](docs/quickstart.md)
-- [Configuration](docs/configuration.md)
-- [CLI reference](docs/cli.md)
-- [API](docs/api.md)
-- [Economics](docs/economics.md)
-- [Limitations](docs/limitations.md)
-- [Contributing](CONTRIBUTING.md)
-- [Security](SECURITY.md)
+- [Installation and extras](https://github.com/arnsri33/embedflow/blob/main/docs/installation.md)
+- [Quickstart](https://github.com/arnsri33/embedflow/blob/main/docs/quickstart.md)
+- [Configuration](https://github.com/arnsri33/embedflow/blob/main/docs/configuration.md)
+- [CLI reference](https://github.com/arnsri33/embedflow/blob/main/docs/cli.md)
+- [API](https://github.com/arnsri33/embedflow/blob/main/docs/api.md)
+- [Economics](https://github.com/arnsri33/embedflow/blob/main/docs/economics.md)
+- [Limitations](https://github.com/arnsri33/embedflow/blob/main/docs/limitations.md)
+- [Contributing](https://github.com/arnsri33/embedflow/blob/main/CONTRIBUTING.md)
+- [Security](https://github.com/arnsri33/embedflow/blob/main/SECURITY.md)
 
 ## Status
 
@@ -228,7 +232,8 @@ testing.
 
 The accompanying paper is *EmbedFlow: Upgrading Legacy Embeddings Without
 Full Upfront Re-Embedding*. The public paper URL is coming soon. Citation
-metadata is in [`CITATION.cff`](CITATION.cff).
+metadata is in
+[`CITATION.cff`](https://github.com/arnsri33/embedflow/blob/main/CITATION.cff).
 
 ## License
 

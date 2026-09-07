@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from argparse import Namespace
 from pathlib import Path
 
 import numpy as np
 
+import embedflow.cli as cli
 from embedflow.cache import SQLiteVectorCache
 from embedflow.compatibility.candidate_gap import compute_candidate_gap_curve
 from embedflow.compatibility.migration_depth import observed_migration_depth
@@ -86,3 +88,29 @@ def test_environment_overrides_are_explicit_and_validated(tmp_path: Path, monkey
     cfg = load_config(config_path)
     assert cfg.migration.candidate_depth == "auto"
     assert cfg.migration.max_sync_misses == 0
+
+
+def test_cli_version_is_available(capsys):
+    try:
+        cli.build_parser().parse_args(["--version"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    else:
+        raise AssertionError("--version should terminate argparse successfully")
+    assert "embedflow 0.1.0" in capsys.readouterr().out
+
+
+def test_doctor_treats_optional_runtime_modules_as_warnings(monkeypatch, capsys):
+    original_find_spec = cli.importlib.util.find_spec
+    optional_modules = {"faiss", "torch", "fastapi", "qdrant_client"}
+
+    def missing_optional(name: str):
+        if name in optional_modules:
+            return None
+        return original_find_spec(name)
+
+    monkeypatch.setattr(cli.importlib.util, "find_spec", missing_optional)
+    assert cli.cmd_doctor(Namespace(config=None, json=False)) == 0
+    output = capsys.readouterr().out
+    assert "WARN  pytorch:" in output
+    assert "Overall: PASS" in output
