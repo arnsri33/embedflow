@@ -1,11 +1,9 @@
 # Documentation assets
 
-The release includes small, reproducible visuals only:
+The README uses a small Mermaid architecture diagram so it renders cleanly on
+GitHub. The remaining assets are lightweight instructions and a deterministic
+terminal still:
 
-- [`architecture.svg`](architecture.svg) — source candidates, target cache,
-  reranking, and materialization queue;
-- [`candidate-gap-example.svg`](candidate-gap-example.svg) — an illustrative
-  curve from the bundled synthetic evaluation fixture;
 - [`terminal-demo.txt`](terminal-demo.txt) — an asciinema-like deterministic
   demo still;
 - [`dashboard-screenshot.md`](dashboard-screenshot.md) — instructions for
