@@ -1,0 +1,55 @@
+{
+  "registry_version": "0.1.0",
+  "summaries": [
+    {
+      "summary_id": "development_63_cell_audit",
+      "kind": "development_sweep_summary",
+      "cells": 63,
+      "point_estimate_g50_le_0_01": 42,
+      "ci_certified_cells": 26,
+      "excluding_nanoquora_and_nanomsmarco": {
+        "cells": 45,
+        "point_estimate_g50_le_0_01": 25,
+        "ci_certified_cells": 11
+      },
+      "provenance": {
+        "artifact": "iclr_candidate_compatibility/results/DEVELOPMENT_63_FINAL.csv",
+        "artifact_sha256": "af614e572c811c3905ad1071548bbb53d01e1079eff6232c5cf2ec9bdf294560",
+        "supporting_artifact": "iclr_candidate_compatibility/ICLR_Embedding_Vector_Migration_backup_20260823_precleanup/paper_appendix_artifacts/data/full_63_cell_appendix_table.csv",
+        "supporting_artifact_sha256": "005d5957f4827e8cb133e8d101e3a0a95ecdf6f753af7c77d97e7c5a86b3ddc5",
+        "table": "APPENDIX_BUILD_REPORT.md",
+        "status": "retained_external",
+        "git_commit": null
+      },
+      "notes": [
+        "Aggregate development evidence, not a model-pair guarantee.",
+        "The 63 cells include the retained development matrix; frozen holdout counts are reported separately."
+      ]
+    },
+    {
+      "summary_id": "t2_v1_frozen_holdout_audit",
+      "kind": "t2_holdout_summary",
+      "cells": 28,
+      "compatible_cells": 22,
+      "safe_predictions": 17,
+      "observed_false_safe_predictions": 0,
+      "groups": [
+        {"source": "Qwen3-Embedding-0.6B", "target": "Qwen3-Embedding-4B", "cells": 7, "compatible": 6, "safe": 4, "false_safe": 0},
+        {"source": "MiniLM-L6", "target": "Qwen3-Embedding-8B", "cells": 7, "compatible": 3, "safe": 2, "false_safe": 0},
+        {"source": "Qwen3-Embedding-0.6B", "target": "Qwen3-Embedding-8B", "cells": 7, "compatible": 6, "safe": 4, "false_safe": 0},
+        {"source": "Qwen3-Embedding-4B", "target": "Qwen3-Embedding-8B", "cells": 7, "compatible": 7, "safe": 7, "false_safe": 0}
+      ],
+      "provenance": {
+        "artifact": "final_paper_audit/t2_holdout_ledger.csv",
+        "artifact_sha256": "dfeca01f6bd1891bb2e4ba04cd0db1988ff273419f91c617a72d863a9bd92a47",
+        "table": "T2_HOLDOUT_AUDIT.md",
+        "status": "retained_external",
+        "git_commit": null
+      },
+      "notes": [
+        "Frozen leakage-safe holdout reconstruction; SAFE is an empirical diagnostic, not a guarantee.",
+        "False-safe is an observed holdout count, not a universal error bound."
+      ]
+    }
+  ]
+}

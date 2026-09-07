@@ -1,0 +1,38 @@
+[
+  {
+    "case": "retained_holdout_qwen06_to_4b_arguana",
+    "features": {
+      "probe_residual_tail_50_mean": 0.0025210084033613,
+      "deepest_p90": 58.0,
+      "late_tail_area": 0.0177404295051353,
+      "stability_to_500_50_mean": 0.9974789915966388,
+      "last_shell_any_rate": 0.0,
+      "fraction_margin_nonpositive": 0.1092436974789916
+    },
+    "diagnostic": "SAFE"
+  },
+  {
+    "case": "retained_holdout_qwen06_to_4b_nanofiqa",
+    "features": {
+      "probe_residual_tail_50_mean": 0.0919999999999999,
+      "deepest_p90": 251.2,
+      "late_tail_area": 0.2911111111111111,
+      "stability_to_500_50_mean": 0.908,
+      "last_shell_any_rate": 0.2,
+      "fraction_margin_nonpositive": 0.5
+    },
+    "diagnostic": "EXPAND"
+  },
+  {
+    "case": "retained_holdout_qwen06_to_8b_nanofiqa",
+    "features": {
+      "probe_residual_tail_50_mean": 0.0699999999999999,
+      "deepest_p90": 233.20000000000005,
+      "late_tail_area": 0.2866666666666667,
+      "stability_to_500_50_mean": 0.93,
+      "last_shell_any_rate": 0.18,
+      "fraction_margin_nonpositive": 0.7
+    },
+    "diagnostic": "UNSAFE_OR_UNCERTAIN"
+  }
+]

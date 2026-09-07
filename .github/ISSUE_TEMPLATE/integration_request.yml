@@ -1,0 +1,30 @@
+name: Integration request
+description: Request support for a vector database or model integration.
+title: "integration: "
+labels: ["integration"]
+body:
+  - type: input
+    id: vector_db
+    attributes:
+      label: Vector database
+      placeholder: Pinecone, Weaviate, pgvector, Milvus, OpenSearch, ...
+    validations:
+      required: true
+  - type: input
+    id: source_model
+    attributes:
+      label: Source model
+  - type: input
+    id: target_model
+    attributes:
+      label: Target model
+  - type: input
+    id: corpus_size
+    attributes:
+      label: Corpus size
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Existing migration workflow and desired support
+    validations:
+      required: true

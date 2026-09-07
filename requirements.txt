@@ -1,0 +1,8 @@
+# EmbedFlow's portable runtime dependencies.
+#
+# This file intentionally excludes optional heavyweight integrations and model
+# runtimes. Install only what a deployment needs with the extras documented in
+# README.md, for example: pip install -e ".[faiss,dashboard]".
+numpy>=1.24
+PyYAML>=6.0
+tqdm>=4.65

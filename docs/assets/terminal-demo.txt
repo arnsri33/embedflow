@@ -1,0 +1,19 @@
+EmbedFlow deterministic demo (offline)
+======================================
+
+$ embedflow demo --path ./demo-runtime --no-serve
+T2-v1 diagnostic: SAFE; recommended K=10
+Demo ready at ./demo-runtime/embedflow.yaml
+
+$ embedflow search --config ./demo-runtime/embedflow.yaml --demo \
+    "what explains auroras?" --top-k 3
+state: COLD   source candidates: 10   cache: 0/10   queued: 8
+
+... background materializer runs ...
+
+$ embedflow search --config ./demo-runtime/embedflow.yaml --demo \
+    "what explains auroras?" --top-k 3
+state: WARM   source candidates: 10   cache: 10/10   queued: 0
+
+The exact state and latency values depend on the local machine. This still is
+an illustrative terminal still, not a performance claim.

@@ -1,0 +1,39 @@
+name: Bug report
+description: Report a reproducible problem in EmbedFlow.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please remove credentials, private data, and production identifiers.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include the smallest reproducible example and expected behavior.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: EmbedFlow version
+      placeholder: 0.1.0 or git commit
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, CPU/GPU, FAISS/Qdrant version, and relevant model/index settings.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or traceback
+      render: shell

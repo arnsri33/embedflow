@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "embedflow"
+version = "0.1.0"
+description = "Progressive embedding-model migration over an existing vector index"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Arnav Srivastav" }]
+keywords = ["embeddings", "vector-search", "rag", "information-retrieval", "faiss", "qdrant"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "numpy>=1.24",
+  "pyyaml>=6.0",
+  "tqdm>=4.65",
+]
+
+[project.optional-dependencies]
+faiss = ["faiss-cpu>=1.8.0"]
+qdrant = ["qdrant-client>=1.9"]
+models = ["huggingface-hub>=0.20", "transformers>=4.45", "sentence-transformers>=3.0", "torch>=2.2"]
+dashboard = ["fastapi>=0.100", "uvicorn[standard]>=0.23", "pydantic>=2.0"]
+all = [
+  "faiss-cpu>=1.8.0",
+  "qdrant-client>=1.9",
+  "huggingface-hub>=0.20",
+  "transformers>=4.45",
+  "sentence-transformers>=3.0",
+  "torch>=2.2",
+  "fastapi>=0.100",
+  "uvicorn[standard]>=0.23",
+  "pydantic>=2.0",
+]
+dev = ["pytest>=8.0", "ruff>=0.5", "build>=1.2"]
+
+[project.scripts]
+embedflow = "embedflow.cli:main"
+
+[project.urls]
+Documentation = "https://github.com/arnsri33/embedflow#readme"
+Issues = "https://github.com/arnsri33/embedflow/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["embedflow*", "src*"]
+
+[tool.setuptools.package-data]
+embedflow = ["frozen/*.md", "frozen/*.sha256", "data/registry/*.json", "data/registry/*.jsonl", "data/registry/*.sha256"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+exclude = ["research", "runs", "src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = ["E501", "E701", "E702"]

@@ -1,0 +1,5 @@
+# Development/test dependencies for a checkout.
+-r requirements.txt
+pytest>=8.0
+ruff>=0.5
+build>=1.2

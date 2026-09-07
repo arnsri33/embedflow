@@ -1,0 +1,28 @@
+source:
+  model: embedflow/demo-source
+  dimension: 64
+target:
+  model: embedflow/demo-target
+  dimension: 64
+index:
+  backend: faiss
+  path: ./legacy.index
+  metric: cosine
+documents:
+  path: ./documents.jsonl
+  id_field: id
+  text_field: text
+probe:
+  queries: ./queries.jsonl
+  k_values: [10, 20, 50]
+  kmax: 50
+migration:
+  candidate_depth: auto
+  kmax_probe: 50
+  max_sync_misses: 1
+  background_batch_size: 4
+cache:
+  path: ./embedflow_cache
+telemetry:
+  latency_log: ./logs/latency.jsonl
+state_path: ./embedflow_state.json

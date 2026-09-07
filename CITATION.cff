@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+title: "EmbedFlow: Upgrading Legacy Embeddings Without Full Upfront Re-Embedding"
+message: "If EmbedFlow contributes to your work, please cite this software release."
+type: software
+version: 0.1.0
+date-released: 2026-09-06
+repository-code: "https://github.com/arnsri33/embedflow"
+url: "https://github.com/arnsri33/embedflow"
+license: Apache-2.0
+authors:
+  - family-names: "Srivastav"
+    given-names: "Arnav"
+keywords:
+  - embeddings
+  - vector search
+  - information retrieval
+  - progressive migration
+  - RAG
+abstract: >-
+  EmbedFlow analyzes whether a legacy embedding index can serve as a candidate
+  pool for a new embedding model and provides progressive target-vector
+  materialization while the new model is serving.

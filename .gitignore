@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime state, caches, logs, and generated reports
+embedflow_cache/
+cache/
+logs/
+*.sqlite
+*.sqlite3
+*.db
+embedflow_state.json
+probe_result.json
+migration_report.json
+results/
+reports/
+examples/*/runtime/
+examples/local_faiss_demo/
+qdrant_storage/
+examples/*/qdrant_storage/
+*.lock
+
+# Model checkpoints and vector artifacts
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+*.index
+*.npy
+*.npz
+*.parquet
+
+# These names are also real source-package directories.
+!embedflow/cache/
+!embedflow/cache/**
+!embedflow/models/
+!embedflow/models/**
+# The package-directory exceptions above must not re-include bytecode caches.
+embedflow/cache/**/__pycache__/
+embedflow/cache/**/__pycache__/**
+embedflow/models/**/__pycache__/
+embedflow/models/**/__pycache__/**
+
+# Local editor / OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build artifacts
+build/
+dist/
+*.whl

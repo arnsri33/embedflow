@@ -1,0 +1,16 @@
+{
+  "registry_version": "0.1.0",
+  "schema_version": "1",
+  "record_count": 15,
+  "profile_count": 3,
+  "summary_count": 2,
+  "namespace": "core",
+  "trust": "verified retained research artifacts",
+  "files": {
+    "schema_version.json": {"sha256": "c3d851bcfe66d9cc1aabc4ec8b61512110d8802ac0bcc7af3239a9ac6cec14a9"},
+    "migrations.jsonl": {"sha256": "1471e7a937d87eeba58d19a801fb8c147f6982d2c1522b5da43f6986b92800d5"},
+    "research_summaries.json": {"sha256": "fcbf2fa0456fc3fc2e30d1b945b05e7d7dcfa11b7187910ced8a3fa0e69f6720"},
+    "benchmark_profiles.jsonl": {"sha256": "4ef2bdfc9f1803ef108400986be6a06915879d302e14a2757fc091c32b5b6e54"}
+  },
+  "provenance_policy": "Every core row names a retained artifact and SHA-256; external artifact paths are not required at install time."
+}
