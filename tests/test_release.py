@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 import embedflow.cli as cli
+from embedflow import __version__
 from embedflow.cache import SQLiteVectorCache
 from embedflow.compatibility.candidate_gap import compute_candidate_gap_curve
 from embedflow.compatibility.migration_depth import observed_migration_depth
@@ -97,7 +98,7 @@ def test_cli_version_is_available(capsys):
         assert exc.code == 0
     else:
         raise AssertionError("--version should terminate argparse successfully")
-    assert "embedflow 0.1.0" in capsys.readouterr().out
+    assert f"embedflow {__version__}" in capsys.readouterr().out
 
 
 def test_doctor_treats_optional_runtime_modules_as_warnings(monkeypatch, capsys):
