@@ -1,6 +1,6 @@
 """EmbedFlow: progressive embedding-model migration for existing indexes."""
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from .config import EmbedFlowConfig, load_config
 

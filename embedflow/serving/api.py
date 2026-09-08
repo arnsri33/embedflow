@@ -77,7 +77,7 @@ def create_app(engine: Any):
     except ImportError as exc:
         raise RuntimeError("API requires fastapi, uvicorn, and pydantic") from exc
 
-    app = FastAPI(title="EmbedFlow", version="0.1.0")
+    app = FastAPI(title="EmbedFlow", version="0.1.1")
 
     @app.get("/", response_class=HTMLResponse)
     def root(): return dashboard_html(engine.cfg.dashboard_title)
