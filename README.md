@@ -242,4 +242,4 @@ metadata is in
 
 ## License
 
-Apache-2.0. Copyright 2026 Arnav Srivastav.
+Apache-2.0. Copyright 2026 Arnav Srivastav.  embedflow.org
