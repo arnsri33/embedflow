@@ -2,6 +2,8 @@
 
 **Progressive embedding-model migration over existing vector indexes.**
 
+🌐 **Website:** [embedflow.org](https://embedflow.org)
+
 EmbedFlow lets a new embedding model serve over candidates from an existing
 vector index while target document vectors are materialized progressively. It
 supports migration analysis, persistent caching, background work, and serving
@@ -239,6 +241,7 @@ The accompanying paper is *EmbedFlow: Upgrading Legacy Embeddings Without
 Full Upfront Re-Embedding*. The public paper URL is coming soon. Citation
 metadata is in
 [`CITATION.cff`](https://github.com/arnsri33/embedflow/blob/main/CITATION.cff).
+
 
 ## License
 
