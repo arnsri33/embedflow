@@ -38,26 +38,29 @@ Measured candidate gap from the registry:
 
 ## Install
 
-```bash
-git clone https://github.com/arnsri33/embedflow.git
-cd embedflow
+Install the published package from PyPI:
 
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -e ".[faiss,dashboard]"
+```bash
+python -m pip install embedflow
+```
+
+For FAISS and the dashboard, add the optional integrations:
+
+```bash
+python -m pip install "embedflow[faiss,dashboard]"
 ```
 
 Qdrant and model-runtime extras are documented in
 [`docs/installation.md`](https://github.com/arnsri33/embedflow/blob/main/docs/installation.md).
-The requirements files are also available for conventional installs.
-For the model-backed command below, install `.[faiss,models,dashboard]`.
+For model-backed analysis, install `embedflow[faiss,models,dashboard]`.
 
 ## Try it
 
 The deterministic demo needs no paid service or model download:
+install the FAISS/dashboard variant above to use its browser UI.
 
 ```bash
-./scripts/run_demo.sh
+embedflow demo
 ```
 
 Open <http://127.0.0.1:8000/>. The first search can be `COLD` or `PARTIAL`;
@@ -67,8 +70,10 @@ persistent cache.
 For a setup-only run, pass `--no-serve`:
 
 ```bash
-./scripts/run_demo.sh --no-serve
+embedflow demo --no-serve
 ```
+
+The repository also includes `scripts/run_demo.sh` for source-checkout development.
 
 ## Analyze a migration
 

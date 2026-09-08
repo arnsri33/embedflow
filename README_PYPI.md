@@ -39,11 +39,11 @@ the background.
 
 ## Try it
 
-The deterministic demo needs no paid service or model download. From a source
-checkout, run:
+The deterministic demo needs no paid service or model download:
+install `embedflow[faiss,dashboard]` to use its browser UI.
 
 ```bash
-./scripts/run_demo.sh
+embedflow demo
 ```
 
 Open <http://127.0.0.1:8000/>. The first search can be `COLD` or `PARTIAL`;
