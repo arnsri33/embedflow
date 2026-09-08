@@ -240,7 +240,7 @@ Full Upfront Re-Embedding*. The public paper URL is coming soon. Citation
 metadata is in
 [`CITATION.cff`](https://github.com/arnsri33/embedflow/blob/main/CITATION.cff).
 
-[embedflow.org](url)
+[embedflow.org](embedflow.org)
 
 ## License
 
