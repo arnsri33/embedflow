@@ -6,7 +6,7 @@ version: 0.1.0
 date-released: 2026-09-06
 repository-code: "https://github.com/arnsri33/embedflow"
 url: "https://github.com/arnsri33/embedflow"
-license: Apache-2.0
+license: AGPL-3.0-only
 authors:
   - family-names: "Srivastav"
     given-names: "Arnav"
