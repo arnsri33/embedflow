@@ -14,12 +14,14 @@ target:
   device: cuda
 
 index:
-  backend: faiss                 # faiss or qdrant
+  backend: faiss                 # faiss, qdrant, or pgvector
   path: ./legacy.index
   ids: ./legacy.index.ids.json   # FAISS sidecar
   metric: cosine
   nprobe: 64
   # Qdrant fields: url, collection, vector_name, api_key_env
+  # pgvector fields: dsn_env, schema, table, id_column, vector_column, text_column
+  #                 hnsw_ef_search, ivfflat_probes
 
 documents:
   path: ./documents.jsonl
@@ -78,6 +80,14 @@ EMBEDFLOW_INDEX_URL
 EMBEDFLOW_INDEX_COLLECTION
 EMBEDFLOW_INDEX_VECTOR_NAME
 EMBEDFLOW_QDRANT_API_KEY_ENV
+EMBEDFLOW_PGVECTOR_DSN_ENV
+EMBEDFLOW_PGVECTOR_SCHEMA
+EMBEDFLOW_PGVECTOR_TABLE
+EMBEDFLOW_PGVECTOR_ID_COLUMN
+EMBEDFLOW_PGVECTOR_VECTOR_COLUMN
+EMBEDFLOW_PGVECTOR_TEXT_COLUMN
+EMBEDFLOW_PGVECTOR_HNSW_EF_SEARCH
+EMBEDFLOW_PGVECTOR_IVFFLAT_PROBES
 EMBEDFLOW_INDEX_NPROBE
 EMBEDFLOW_DOCUMENTS_PATH
 EMBEDFLOW_CACHE_PATH

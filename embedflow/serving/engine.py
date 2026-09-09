@@ -121,9 +121,14 @@ class MigrationEngine:
         t = time.perf_counter_ns(); selected = target_order[:max(1, int(top_k))]; row["topk_ms"] = _elapsed(t)
         target_rank = {doc_id: rank for rank, doc_id in enumerate(target_order, 1)}
         source_rank = {hit.document_id: hit.source_rank + 1 for hit in candidates}
+        # Resolve result text in one batch.  PgVectorDocumentStore turns this
+        # into a single ``WHERE id = ANY(...)`` query instead of issuing one
+        # SQL request per selected document; the regular JSONL store keeps the
+        # same behavior behind its existing DocumentStore contract.
+        selected_texts = self.documents.get(selected) if selected else {}
         results = []
         for doc_id in selected:
-            results.append({"id": doc_id, "text": self.documents.get([doc_id])[doc_id], "target_score": scores.get(doc_id),
+            results.append({"id": doc_id, "text": selected_texts[doc_id], "target_score": scores.get(doc_id),
                             "source_rank": source_rank.get(doc_id), "target_rank": target_rank.get(doc_id), "target_vector_cached": doc_id in cached})
         # State describes vectors available for this response, including the
         # bounded synchronous budget.  ``cache_hits`` remains the persistent
@@ -182,7 +187,8 @@ class MigrationEngine:
             if np.isfinite(value) and value >= 0:
                 values.append(value)
         lat = summarize(values) if values else {"count": 0}
-        return {"migration": plan.to_dict(), "cache": cache, "worker": worker, "state": data, "latency": lat}
+        return {"migration": plan.to_dict(), "index": self.source_index.metadata(), "cache": cache,
+                "worker": worker, "state": data, "latency": lat}
 
     def close(self, close_models: bool = True, close_indexes: bool = True) -> None:
         """Stop background work and close resources.

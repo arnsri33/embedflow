@@ -1,0 +1,48 @@
+source:
+  model: embedflow/demo-source
+  dimension: 64
+  normalization: l2
+  device: cpu
+
+target:
+  model: embedflow/demo-target
+  dimension: 64
+  normalization: l2
+  device: cpu
+
+index:
+  backend: pgvector
+  dsn_env: EMBEDFLOW_PGVECTOR_DSN
+  schema: public
+  table: documents
+  id_column: id
+  vector_column: embedding
+  text_column: content
+  metric: cosine
+  hnsw_ef_search: 40
+
+# The table supplies text. This path is intentionally absent in the example;
+# a JSONL file can be added here when an installation stores text elsewhere.
+documents:
+  path: ./documents.jsonl
+  id_field: id
+  text_field: text
+
+probe:
+  queries: ./queries.jsonl
+  k_values: [1, 3, 5]
+  kmax: 10
+  epsilon: 0.01
+
+migration:
+  candidate_depth: 5
+  kmax_probe: 10
+  probe_queries: 4
+  max_sync_misses: 2
+  background_batch_size: 4
+
+cache:
+  path: ./runtime/cache
+state_path: ./runtime/state.json
+telemetry:
+  latency_log: ./runtime/logs/latency.jsonl

@@ -52,7 +52,7 @@ Registry matching uses model contracts and corpus identity. See
 ```bash
 embedflow economics \
   --corpus-size 1000000000 \
-  --docs-per-second 106.98 \
+  --docs-per-second 100 \
   --gpu-price 3.29
 embedflow doctor --config ./embedflow.yaml
 embedflow demo

@@ -11,6 +11,7 @@ this is not a second query path.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from ..config import (
     hydrate_research_contract,
     save_config,
 )
+from ..indexes import PgVectorDocumentStore, PgVectorIndex
 from ..indexes.base import VectorIndex
 from ..migration.compatibility import run_probe, save_probe
 from ..migration.state import DocumentStore
@@ -39,6 +41,18 @@ _MODEL_REGISTRY = {
     "Qwen/Qwen3-Embedding-4B": "qwen3_4b",
     "Qwen/Qwen3-Embedding-8B": "qwen3_8b",
 }
+
+
+def _infer_backend(index_value: str, explicit: str | None = None) -> str:
+    """Infer a backend from an index value when the caller omits ``backend``."""
+    if explicit:
+        return str(explicit).lower()
+    lowered = str(index_value).strip().lower()
+    if lowered.startswith(("postgresql://", "postgres://")):
+        return "pgvector"
+    if "://" in lowered:
+        return "qdrant"
+    return "faiss"
 
 
 def _is_model(value: Any) -> bool:
@@ -173,12 +187,20 @@ def migrate(
     index: str | Path | VectorIndex,
     old_model: str | Path | EmbeddingModel,
     new_model: str | Path | EmbeddingModel,
-    documents: str | Path | DocumentStore,
+    documents: str | Path | DocumentStore | PgVectorDocumentStore | None = None,
     backend: str | None = None,
     index_url: str | None = None,
     collection: str = "embedflow",
     vector_name: str | None = None,
     api_key_env: str | None = "QDRANT_API_KEY",
+    dsn_env: str | None = "EMBEDFLOW_PGVECTOR_DSN",
+    schema: str = "public",
+    table: str = "documents",
+    id_column: str = "id",
+    vector_column: str = "embedding",
+    text_column: str | None = "content",
+    hnsw_ef_search: int | None = None,
+    ivfflat_probes: int | None = None,
     metric: str = "cosine",
     model_root: str | Path | None = None,
     device: str | None = None,
@@ -196,15 +218,17 @@ def migrate(
     """Start progressive migration over an existing index.
 
     ``index`` may be an existing EmbedFlow ``VectorIndex`` instance or a path
-    to a FAISS index (or a Qdrant path/URL when ``backend="qdrant"``).  Model
+    to a FAISS index, Qdrant path/URL, or pgvector DSN.  Model
     strings are revision-hydrated when they are registered by the research
     contract; model objects can be supplied by an application directly.
     ``probe_queries`` is optional so serving can start immediately.  When
     supplied, the existing frozen T2-v1 implementation is run before the
     session is returned.
     """
-    if isinstance(documents, DocumentStore):
+    if isinstance(documents, (DocumentStore, PgVectorDocumentStore)):
         document_store = documents
+    elif documents is None:
+        document_store = None
     else:
         document_store = DocumentStore(str(documents))
     source_cfg = _model_config(old_model, model_root)
@@ -227,21 +251,38 @@ def migrate(
 
         if not owns_index:
             source_index = index
-            index_backend = backend or ("qdrant" if str(source_index.metadata().get("backend", "")).lower() == "qdrant" else "faiss")
+            index_backend = backend or str(source_index.metadata().get("backend", "faiss")).lower()
             index_path = str(getattr(source_index, "path", "./legacy.index") or "./legacy.index")
         else:
             index_path = str(index_url or index)
-            index_backend = (backend or ("qdrant" if "://" in index_path else "faiss")).lower()
-            if index_backend not in {"faiss", "qdrant"}:
-                raise ValueError("backend must be faiss or qdrant")
+            index_backend = _infer_backend(index_path, backend)
+            if index_backend not in {"faiss", "qdrant", "pgvector"}:
+                raise ValueError("backend must be faiss, qdrant, or pgvector")
 
+        explicit_url = index_url
+        if index_backend == "pgvector" and explicit_url is None and "://" in index_path:
+            explicit_url = index_path
+        if index_backend == "pgvector" and explicit_url:
+            # A direct DSN is accepted for convenience, but generated config
+            # files must remain safe to commit. Resolve it through the named
+            # environment variable for this process and persist only a local
+            # placeholder path plus the variable name.
+            if not dsn_env or not str(dsn_env).strip():
+                raise ValueError("pgvector dsn_env is required when an explicit DSN is supplied")
+            os.environ[str(dsn_env).strip()] = explicit_url
+            explicit_url = None
+            index_path = "./legacy.index"
+        if document_store is None and index_backend != "pgvector":
+            raise ValueError("documents is required for FAISS and Qdrant; pgvector can resolve text from its text_column")
         cfg = EmbedFlowConfig(
             source=source_cfg,
             target=target_cfg,
             index=IndexConfig(backend=index_backend, path=index_path, collection=collection,
-                              url=index_url, metric=str(metric), vector_name=vector_name,
-                              api_key_env=api_key_env),
-            documents=DocumentsConfig(path=str(document_store.path)),
+                              url=explicit_url, metric=str(metric), vector_name=vector_name,
+                              api_key_env=api_key_env, dsn_env=dsn_env, schema=schema, table=table,
+                              id_column=id_column, vector_column=vector_column, text_column=text_column,
+                              hnsw_ef_search=hnsw_ef_search, ivfflat_probes=ivfflat_probes),
+            documents=DocumentsConfig(path=str(document_store.path) if document_store is not None else "./documents.jsonl"),
             migration=MigrationConfig(candidate_depth=int(candidate_depth), kmax_probe=max(int(kmax_probe), int(candidate_depth)),
                                       max_sync_misses=int(max_sync_misses), background_batch_size=int(background_batch_size)),
             cache=CacheConfig(path=str(cache_path)),
@@ -253,7 +294,15 @@ def migrate(
         cfg.validate()
 
         if owns_index:
-            source_index = load_index(cfg, document_store)
+            if document_store is None:
+                source_index = PgVectorIndex.from_config(cfg)
+                document_store = PgVectorDocumentStore(source_index, text_field=cfg.index.text_column or "content", owns_index=False)
+            else:
+                source_index = load_index(cfg, document_store)
+        elif document_store is None:
+            if not isinstance(source_index, PgVectorIndex):
+                raise ValueError("documents is required unless the supplied index is a pgvector backend")
+            document_store = PgVectorDocumentStore(source_index, text_field=cfg.index.text_column or "content", owns_index=False)
         if int(source_index.dimension) != int(source_model.dimension):
             raise ValueError(f"source model dimension {source_model.dimension} != existing index dimension {source_index.dimension}")
         stored_fingerprint = source_index.metadata().get("model_fingerprint")

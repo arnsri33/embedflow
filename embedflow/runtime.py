@@ -6,17 +6,37 @@ from typing import Any
 
 from .cache import SQLiteVectorCache
 from .config import EmbedFlowConfig, load_config
-from .indexes import FaissIndex, NumpyIndex, QdrantIndex
+from .indexes import FaissIndex, NumpyIndex, PgVectorDocumentStore, PgVectorIndex, QdrantIndex
 from .migration.state import DocumentStore
 from .models import load_embedding_model
 from .serving.engine import MigrationEngine
 
 
-def load_documents(cfg: EmbedFlowConfig) -> DocumentStore:
+def load_documents(cfg: EmbedFlowConfig, index: Any | None = None) -> DocumentStore | PgVectorDocumentStore:
+    """Load the configured document resolver.
+
+    A pgvector table commonly stores both the legacy vector and document text.
+    When no JSONL file is present, use a lazy resolver over the same read-only
+    connection instead of requiring users to copy their corpus into a second
+    store.  A JSONL path still takes precedence for deployments that keep text
+    elsewhere.
+    """
+    if cfg.index.backend.lower() == "pgvector" and not Path(cfg.documents.path).expanduser().exists():
+        pg_index = index if isinstance(index, PgVectorIndex) else PgVectorIndex.from_config(cfg)
+        return PgVectorDocumentStore(
+            pg_index,
+            id_field=cfg.documents.id_field,
+            text_field=cfg.index.text_column or cfg.documents.text_field,
+            owns_index=index is None,
+        )
     return DocumentStore(cfg.documents.path, cfg.documents.id_field, cfg.documents.text_field)
 
 
-def load_index(cfg: EmbedFlowConfig, documents: DocumentStore):
+def load_index(cfg: EmbedFlowConfig, documents: DocumentStore | PgVectorDocumentStore):
+    if cfg.index.backend.lower() == "pgvector":
+        if isinstance(documents, PgVectorDocumentStore):
+            return documents.index
+        return PgVectorIndex.from_config(cfg, documents=documents.documents)
     metadata = documents.documents
     if cfg.index.backend.lower() == "faiss":
         try:
@@ -38,11 +58,19 @@ def load_index(cfg: EmbedFlowConfig, documents: DocumentStore):
 
 
 def open_engine(config_path: str | Path, device: str | None = None, demo: bool = False,
-                start_worker: bool = True) -> MigrationEngine:
+                start_worker: bool = True, documents: DocumentStore | PgVectorDocumentStore | None = None,
+                allow_empty_index: bool = False) -> MigrationEngine:
+    """Load models, a source index, cache, and the shared migration engine.
+
+    Serving and analysis require at least one source vector.  ``audit-index``
+    can opt into ``allow_empty_index`` so it can report an empty table as an
+    audit finding instead of failing during engine setup.
+    """
     cfg = load_config(config_path)
     if cfg.index.metric.lower() == "cosine" and (cfg.source.normalization.lower() != "l2" or cfg.target.normalization.lower() != "l2"):
         raise ValueError("cosine index/reranking requires l2-normalized source and target vectors")
-    documents = load_documents(cfg)
+    documents_created = documents is None
+    documents = load_documents(cfg) if documents is None else documents
     override_device = device
     source_device = override_device or cfg.source.device or cfg.target.device or "cpu"
     target_device = override_device or cfg.target.device or cfg.source.device or "cpu"
@@ -55,7 +83,7 @@ def open_engine(config_path: str | Path, device: str | None = None, demo: bool =
         if cfg.source.dimension and int(source_model.dimension) != int(cfg.source.dimension):
             raise ValueError(f"source model dimension {source_model.dimension} != configured {cfg.source.dimension}")
         source_index = load_index(cfg, documents)
-        if source_index.size() <= 0:
+        if source_index.size() <= 0 and not allow_empty_index:
             raise ValueError("legacy index is empty or its configured Qdrant collection is unavailable")
         if int(source_index.dimension) != int(source_model.dimension):
             raise ValueError(f"source model dimension {source_model.dimension} != existing index dimension {source_index.dimension}")
@@ -95,6 +123,13 @@ def open_engine(config_path: str | Path, device: str | None = None, demo: bool =
                 close_index = getattr(source_index, "close", None)
                 if callable(close_index):
                     close_index()
+            except Exception:
+                pass
+        if documents_created:
+            try:
+                close_documents = getattr(documents, "close", None)
+                if callable(close_documents):
+                    close_documents()
             except Exception:
                 pass
         raise

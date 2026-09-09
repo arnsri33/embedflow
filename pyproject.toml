@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "embedflow"
-version = "0.1.1"
+version = "0.2.0"
 description = "Progressive embedding-model migration over existing vector indexes."
 readme = "README_PYPI.md"
 requires-python = ">=3.10"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 authors = [{ name = "Arnav Srivastav" }]
-keywords = ["embeddings", "vector-search", "rag", "information-retrieval", "faiss", "qdrant"]
+keywords = ["embeddings", "vector-search", "rag", "information-retrieval", "faiss", "qdrant", "pgvector"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -31,13 +31,15 @@ dependencies = [
 [project.optional-dependencies]
 faiss = ["faiss-cpu>=1.8.0"]
 qdrant = ["qdrant-client>=1.9"]
-models = ["huggingface-hub>=0.20", "transformers>=4.45", "sentence-transformers>=3.0", "torch>=2.2"]
+pgvector = ["psycopg[binary]>=3.2"]
+models = ["huggingface-hub>=0.34,<1.0", "transformers>=4.45,<5.0", "sentence-transformers>=3.0", "torch>=2.2"]
 dashboard = ["fastapi>=0.100", "uvicorn[standard]>=0.23", "pydantic>=2.0"]
 all = [
   "faiss-cpu>=1.8.0",
   "qdrant-client>=1.9",
-  "huggingface-hub>=0.20",
-  "transformers>=4.45",
+  "psycopg[binary]>=3.2",
+  "huggingface-hub>=0.34,<1.0",
+  "transformers>=4.45,<5.0",
   "sentence-transformers>=3.0",
   "torch>=2.2",
   "fastapi>=0.100",

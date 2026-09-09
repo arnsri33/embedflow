@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.0 — pgvector backend
+
+- Added a read-only pgvector backend for existing PostgreSQL vector tables.
+- Added cosine, Euclidean/L2, and inner-product retrieval with safe SQL
+  identifier composition.
+- Added pgvector table auditing, optional transaction-local HNSW/IVFFlat
+  settings, Docker example, and numerical/SQL-safety tests.
+
 ## v0.1.0 — initial public release
 
 - Candidate-compatibility analysis and Mode A evaluation workflows.

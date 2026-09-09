@@ -13,8 +13,8 @@ Interactive OpenAPI documentation is available at
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/health` | Process and backend health |
-| GET | `/status` | Cache, queue, model, and migration state |
+| GET | `/health` | Lightweight process liveness |
+| GET | `/status` | Cache, queue, model, migration, and backend metadata |
 | POST | `/search` | Source retrieval and target reranking |
 | POST | `/analyze` | Run or retrieve migration analysis |
 | POST | `/prewarm` | Queue document materialization |
@@ -47,6 +47,10 @@ The response includes the result list and migration fields such as:
 `COLD`, `PARTIAL`, and `WARM` describe target-vector availability for that
 request. A partial response scores the available target vectors; it can differ
 from the fully warm ranking.
+
+`/status` includes safe backend metadata. For pgvector this names the
+schema/table and vector contract without returning the DSN or credentials;
+`/health` remains a compact liveness response for probes and load balancers.
 
 ## Errors
 

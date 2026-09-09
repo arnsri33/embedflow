@@ -41,9 +41,9 @@ async function jsonFetch(url, options){
 async function refresh(){
   try{
     const s=await jsonFetch('/status');
-    const m=s.migration||{},c=s.cache||{},w=s.worker||{},l=s.latency||{};
+    const m=s.migration||{},i=s.index||{},c=s.cache||{},w=s.worker||{},l=s.latency||{};
     document.querySelector('#status').className='card';
-    document.querySelector('#status').innerHTML=`<div class="grid"><div><div class="label">Source</div><div class="value"><code>${esc(m.source_model||'configured')}</code></div></div><div><div class="label">Target</div><div class="value"><code>${esc(m.target_model||'configured')}</code></div></div><div><div class="label">Diagnostic</div><div class="value">${esc(m.diagnostic)}</div></div><div><div class="label">Candidate depth</div><div class="value">K=${fmt(m.candidate_depth)}</div></div><div><div class="label">Cache progress</div><div class="value">${fmt(c.cached_target_vectors)} / ${fmt(m.corpus_size)} (${fmt(100*(m.cache_fraction||0))}%)</div></div><div><div class="label">Background throughput</div><div class="value">${fmt(w.last_throughput_docs_sec)} docs/s</div></div><div><div class="label">Query p50/p95</div><div class="value">${fmt(l.p50_ms)} / ${fmt(l.p95_ms)} ms</div></div></div><p>Status: <b>${esc(m.status)}</b> · ANN: <b>${esc(m.ann_status)}</b></p>`;
+    document.querySelector('#status').innerHTML=`<div class="grid"><div><div class="label">Source</div><div class="value"><code>${esc(m.source_model||'configured')}</code></div></div><div><div class="label">Target</div><div class="value"><code>${esc(m.target_model||'configured')}</code></div></div><div><div class="label">Backend</div><div class="value"><code>${esc(i.backend||'configured')}</code></div></div><div><div class="label">Diagnostic</div><div class="value">${esc(m.diagnostic)}</div></div><div><div class="label">Candidate depth</div><div class="value">K=${fmt(m.candidate_depth)}</div></div><div><div class="label">Cache progress</div><div class="value">${fmt(c.cached_target_vectors)} / ${fmt(m.corpus_size)} (${fmt(100*(m.cache_fraction||0))}%)</div></div><div><div class="label">Background throughput</div><div class="value">${fmt(w.last_throughput_docs_sec)} docs/s</div></div><div><div class="label">Query p50/p95</div><div class="value">${fmt(l.p50_ms)} / ${fmt(l.p95_ms)} ms</div></div></div><p>Status: <b>${esc(m.status)}</b> · ANN: <b>${esc(m.ann_status)}</b></p>`;
   }catch(error){
     document.querySelector('#status').className='card error';
     document.querySelector('#status').textContent='Unable to load migration status: '+error.message;
@@ -77,13 +77,22 @@ def create_app(engine: Any):
     except ImportError as exc:
         raise RuntimeError("API requires fastapi, uvicorn, and pydantic") from exc
 
-    app = FastAPI(title="EmbedFlow", version="0.1.1")
+    from .. import __version__
+    app = FastAPI(title="EmbedFlow", version=__version__)
 
     @app.get("/", response_class=HTMLResponse)
     def root(): return dashboard_html(engine.cfg.dashboard_title)
 
     @app.get("/health")
-    def health(): return {"status": "ok"}
+    def health():
+        """Return the lightweight liveness response.
+
+        Backend-specific diagnostics belong to ``/status`` (and are included
+        there by the migration engine). Keeping this endpoint's compact
+        ``{"status": "ok"}`` contract makes it suitable for load balancers
+        and preserves compatibility with existing clients.
+        """
+        return {"status": "ok"}
 
     @app.get("/status")
     def status(): return engine.status()

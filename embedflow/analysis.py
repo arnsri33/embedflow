@@ -129,7 +129,7 @@ def analyze_migration(
         )
         if use_registry and registry.level != "EXACT REGISTRY MATCH":
             raise ValueError("--use-registry requires an EXACT REGISTRY MATCH")
-        engine = open_engine(config_path, device=device, demo=demo, start_worker=False)
+        engine = open_engine(config_path, device=device, demo=demo, start_worker=False, documents=docs)
         result = run_probe(
             engine.source_model,
             engine.target_model,
@@ -185,6 +185,10 @@ def analyze_migration(
     finally:
         if engine is not None:
             engine.close()
+        elif 'docs' in locals():
+            close_documents = getattr(docs, "close", None)
+            if callable(close_documents):
+                close_documents()
         if temporary_config is not None:
             temporary_config.unlink(missing_ok=True)
 

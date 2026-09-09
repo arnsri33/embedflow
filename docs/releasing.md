@@ -18,8 +18,8 @@ python -m twine check dist/*
 Inspect both archives before uploading:
 
 ```bash
-unzip -l dist/embedflow-0.1.0-py3-none-any.whl
-tar -tzf dist/embedflow-0.1.0.tar.gz
+unzip -l dist/embedflow-0.2.0-py3-none-any.whl
+tar -tzf dist/embedflow-0.2.0.tar.gz
 sha256sum dist/*
 ```
 
@@ -32,7 +32,7 @@ Test the wheel outside the source tree:
 ```bash
 python -m venv /tmp/embedflow-wheel-test
 /tmp/embedflow-wheel-test/bin/python -m pip install --upgrade pip
-/tmp/embedflow-wheel-test/bin/python -m pip install dist/embedflow-0.1.0-py3-none-any.whl
+/tmp/embedflow-wheel-test/bin/python -m pip install dist/embedflow-0.2.0-py3-none-any.whl
 cd /tmp
 /tmp/embedflow-wheel-test/bin/python -c "import embedflow; print(embedflow.__version__)"
 /tmp/embedflow-wheel-test/bin/embedflow --help
@@ -65,7 +65,7 @@ python -m venv /tmp/embedflow-testpypi
 /tmp/embedflow-testpypi/bin/python -m pip install \
   --index-url https://test.pypi.org/simple/ \
   --extra-index-url https://pypi.org/simple/ \
-  embedflow==0.1.0
+  embedflow==0.2.0
 cd /tmp
 /tmp/embedflow-testpypi/bin/python -c "import embedflow; print(embedflow.__version__)"
 /tmp/embedflow-testpypi/bin/embedflow --help
@@ -79,11 +79,11 @@ Test optional integrations in a second clean environment:
 /tmp/embedflow-testpypi/bin/python -m pip install \
   --index-url https://test.pypi.org/simple/ \
   --extra-index-url https://pypi.org/simple/ \
-  "embedflow[faiss,dashboard]==0.1.0"
+  "embedflow[faiss,dashboard]==0.2.0"
 ```
 
 If the same filename already exists on TestPyPI, use a pre-release such as
-`0.1.0rc1` for the TestPyPI-only trial. Keep production `0.1.0` unchanged.
+`0.2.0rc1` for the TestPyPI-only trial. Keep production `0.2.0` unchanged.
 
 ## Trusted Publishing configuration
 
@@ -115,7 +115,7 @@ above keeps the test step explicit.
 3. Run the final release gate and review the generated report.
 4. Configure the PyPI pending publisher and protected `pypi` environment.
 5. Create a Git tag and GitHub Release for the exact package version, for
-   example `v0.1.0`.
+   example `v0.2.0`.
 6. Approve the `pypi` environment when the release workflow is ready.
 7. Verify the files and metadata on PyPI.
 8. Install from production PyPI in a directory outside this checkout.
@@ -123,7 +123,7 @@ above keeps the test step explicit.
 The GitHub workflow builds once, validates the metadata and wheel, transfers
 those exact files as an artifact, and then publishes them. PyPI filenames are
 immutable, so a correction after publishing requires a new version such as
-`0.1.1`.
+`0.2.1`.
 
 ## After production publication
 

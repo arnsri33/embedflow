@@ -144,16 +144,28 @@ class MaterializationWorker:
                 time.sleep(0.05)
                 continue
             try:
-                # Resolve documents individually so one missing/deleted row is
-                # marked as an error without poisoning the rest of a batch.
+                # Resolve a normal work batch with one document-store lookup.
+                # If a store enforces strict missing-document errors, fall
+                # back to per-document checks so one deleted row does not
+                # poison the rest of the batch.  The fallback is exceptional;
+                # pgvector and JSONL stores therefore avoid an N+1 query loop
+                # while all-document batches are healthy.
                 available: list[str] = []
                 texts: list[str] = []
                 missing: list[str] = []
+                try:
+                    resolved = self.documents.get(ids)
+                except Exception:
+                    resolved = {}
+                    for document_id in ids:
+                        try:
+                            value = self.documents.get([document_id]).get(document_id)
+                        except Exception:
+                            value = None
+                        if value is not None:
+                            resolved[document_id] = value
                 for document_id in ids:
-                    try:
-                        value = self.documents.get([document_id]).get(document_id)
-                    except Exception:
-                        value = None
+                    value = resolved.get(document_id)
                     if value is None:
                         missing.append(document_id)
                     else:

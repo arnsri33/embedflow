@@ -6,7 +6,7 @@ throughput and GPU price supplied by the user:
 ```bash
 embedflow economics \
   --corpus-size 1000000000 \
-  --docs-per-second 106.98 \
+  --docs-per-second 100 \
   --gpu-price 3.29
 ```
 

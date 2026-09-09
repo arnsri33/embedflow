@@ -30,6 +30,7 @@ python -m pip install -e .
 | --- | --- |
 | `faiss` | FAISS source-index adapter |
 | `qdrant` | Qdrant client and adapter |
+| `pgvector` | Psycopg 3 binary driver and pgvector adapter |
 | `models` | PyTorch, Transformers, Sentence Transformers, and Hub client |
 | `dashboard` | FastAPI, Uvicorn, and Pydantic |
 | `dev` | Pytest, Ruff, and build tooling |
@@ -51,6 +52,12 @@ Install the client with `.[qdrant]`. A local Qdrant server can be configured
 with `index.url`; a user-owned cloud or remote server can use an API key named
 by `index.api_key_env`. Keep the key in the environment. See
 [`integrations/qdrant.md`](integrations/qdrant.md).
+
+## PostgreSQL / pgvector
+
+Install the optional adapter with `python -m pip install "embedflow[pgvector]"`.
+The adapter connects to an existing table and reads the DSN from the
+environment; see [`integrations/pgvector.md`](integrations/pgvector.md).
 
 ## CPU and GPU
 

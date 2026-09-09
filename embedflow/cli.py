@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import platform
 import random
 import sys
@@ -50,6 +51,14 @@ def _normalize_device(value: str | None) -> str | None:
         return None
     value = str(value).strip()
     return "cuda" if value.lower() == "gpu" else value
+
+
+def _index_display(cfg: EmbedFlowConfig) -> str:
+    """Describe an index without echoing pgvector credentials."""
+    if cfg.index.backend.lower() == "pgvector":
+        connection_source = "explicit DSN" if cfg.index.url or "://" in str(cfg.index.path) else f"DSN via {cfg.index.dsn_env or 'configured environment'}"
+        return f"{cfg.index.schema}.{cfg.index.table} ({connection_source})"
+    return str(cfg.index.path)
 
 
 def _load_queries(path: str | Path) -> list[tuple[str, str]]:
@@ -131,14 +140,30 @@ def _direct_analysis_config(args: argparse.Namespace) -> tuple[Path, EmbedFlowCo
     source = hydrate_research_contract(ModelConfig(str(args.source_model)), project_root=Path(__file__).resolve().parents[1])
     target = hydrate_research_contract(ModelConfig(str(args.target_model)), project_root=Path(__file__).resolve().parents[1])
     index_value = str(args.index)
-    qdrant_url = index_value if args.backend == "qdrant" and "://" in index_value else None
-    index_path = index_value if qdrant_url else str(Path(index_value).expanduser().resolve())
+    backend = args.backend
+    if backend is None:
+        lowered_index = index_value.strip().lower()
+        backend = "pgvector" if lowered_index.startswith(("postgresql://", "postgres://")) else ("qdrant" if "://" in lowered_index else "faiss")
+    remote_url = index_value if backend in {"qdrant", "pgvector"} and "://" in index_value else None
+    if backend == "pgvector" and remote_url:
+        # A one-shot DSN is convenient, but never write credentials into the
+        # generated reusable YAML. Keep it in this process under the declared
+        # environment-variable name; the saved config remains secret-free.
+        os.environ[args.dsn_env] = remote_url
+        remote_url = None
+        index_path = "./legacy.index"
+    else:
+        index_path = index_value if remote_url else str(Path(index_value).expanduser().resolve())
     cfg = EmbedFlowConfig(
         source=source,
         target=target,
-        index=IndexConfig(backend=args.backend, path=index_path, url=qdrant_url, collection=args.collection,
+        index=IndexConfig(backend=backend, path=index_path, url=remote_url, collection=args.collection,
                           vector_name=args.vector_name, api_key_env=args.api_key_env, metric=args.metric,
-                          ids=str(Path(args.index_ids).expanduser().resolve()) if args.index_ids else None),
+                          ids=str(Path(args.index_ids).expanduser().resolve()) if args.index_ids else None,
+                          dsn_env=args.dsn_env, schema=args.schema, table=args.table,
+                          id_column=args.id_column, vector_column=args.vector_column,
+                          text_column=args.text_column, hnsw_ef_search=args.hnsw_ef_search,
+                          ivfflat_probes=args.ivfflat_probes),
         documents=DocumentsConfig(path=str(Path(args.documents).expanduser().resolve())),
         migration=MigrationConfig(candidate_depth="auto", kmax_probe=int(args.kmax or 500), probe_queries=int(args.limit or 100)),
         cache=CacheConfig(path=str(output_dir / "embedflow_cache")),
@@ -153,12 +178,12 @@ def _direct_analysis_config(args: argparse.Namespace) -> tuple[Path, EmbedFlowCo
     return config_path, cfg
 
 
-def _analysis_summary(result: dict[str, Any], *, config: EmbedFlowConfig, output: Path) -> None:
+def _analysis_summary(result: dict[str, Any], *, config: EmbedFlowConfig, output: Path, documents: Any) -> None:
     print("EmbedFlow Migration Analysis")
     print("-" * 50)
     print(f"Source model:\n  {config.source.model}")
     print(f"Target model:\n  {config.target.model}")
-    print(f"Corpus:\n  {DocumentStore(config.documents.path, config.documents.id_field, config.documents.text_field).size():,} documents")
+    print(f"Corpus:\n  {documents.size():,} documents")
     print(f"Diagnostic:\n  {str(result.get('diagnostic', 'UNKNOWN')).upper()}")
     print(f"Recommended initial candidate depth:\n  K = {result.get('recommended_k', 'n/a')}")
     diagnostic = str(result.get("diagnostic", "UNKNOWN")).upper()
@@ -323,7 +348,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         if not args.source_model and not args.target_model and not args.documents and not args.index:
             if sys.stdin.isatty():
                 print("EmbedFlow initialization")
-                args.backend = "qdrant" if input("Existing index backend [1] FAISS / [2] Qdrant (1): ").strip() == "2" else "faiss"
+                backend_choice = input("Existing index backend [1] FAISS / [2] Qdrant / [3] pgvector (1): ").strip()
+                args.backend = {"2": "qdrant", "3": "pgvector"}.get(backend_choice, "faiss")
                 args.source_model = input("Source model: ").strip() or "embedflow/demo-source"
                 args.target_model = input("Target model: ").strip() or "embedflow/demo-target"
                 args.documents = input("Corpus JSONL path (./documents.jsonl): ").strip() or "./documents.jsonl"
@@ -371,6 +397,14 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             collection=args.collection,
             vector_name=args.vector_name,
             api_key_env=args.api_key_env,
+            dsn_env=args.dsn_env,
+            schema=args.schema,
+            table=args.table,
+            id_column=args.id_column,
+            vector_column=args.vector_column,
+            text_column=args.text_column,
+            hnsw_ef_search=args.hnsw_ef_search,
+            ivfflat_probes=args.ivfflat_probes,
             metric=args.metric,
             model_root=args.model_root,
             device=_normalize_device(args.device),
@@ -388,7 +422,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         print("EmbedFlow migration ready")
         print(f"source: {session.config.source.model}")
         print(f"target: {session.config.target.model}")
-        print(f"index: {session.config.index.backend} ({session.config.index.path})")
+        print(f"index: {session.config.index.backend} ({_index_display(session.config)})")
         print(f"candidate depth: K={session.plan.candidate_depth}")
         print(f"diagnostic: {session.plan.diagnostic}")
         if session.config_path:
@@ -426,7 +460,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     _print_registry_match(registry_match, reused=use_registry)
     if use_registry and registry_match.level != MATCH_EXACT:
         raise ValueError("--use-registry requires an EXACT REGISTRY MATCH; prior/related evidence cannot be reused as a result")
-    engine = open_engine(config_path, device=_normalize_device(args.device), demo=args.demo, start_worker=False)
+    engine = open_engine(config_path, device=_normalize_device(args.device), demo=args.demo, start_worker=False, documents=docs)
     try:
         queries = _load_queries(query_path)
         result = run_probe(engine.source_model, engine.target_model, engine.source_index, docs, queries,
@@ -471,7 +505,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         }
         write_report(output_dir / "migration_report.json", report)
         (output_dir / "report.md").write_text(report_markdown(report))
-        _analysis_summary(result, config=cfg, output=out)
+        _analysis_summary(result, config=cfg, output=out, documents=docs)
     finally: engine.close()
     return 0
 
@@ -485,7 +519,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     if not args.qrels:
         raise ValueError("evaluate requires --qrels; Mode A must have relevance labels")
     docs = load_documents(cfg)
-    engine = open_engine(args.config, device=_normalize_device(args.device), demo=args.demo, start_worker=False)
+    engine = open_engine(args.config, device=_normalize_device(args.device), demo=args.demo, start_worker=False, documents=docs)
     evaluation_indexes: list[Any] = []
     try:
         queries = load_queries(query_path)
@@ -496,12 +530,20 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         if args.native_target_index:
             native_index = _load_evaluation_index(args.native_target_index, cfg.index.backend, cfg.index.metric, docs.documents,
                                                   engine.target_model.dimension, cfg.index.collection, cfg.index.url,
-                                                  cfg.index.vector_name, cfg.index.api_key_env, cfg.index.nprobe)
+                                                  cfg.index.vector_name, cfg.index.api_key_env, cfg.index.nprobe,
+                                                  dsn_env=cfg.index.dsn_env, schema=cfg.index.schema, table=cfg.index.table,
+                                                  id_column=cfg.index.id_column, vector_column=cfg.index.vector_column,
+                                                  text_column=cfg.index.text_column, hnsw_ef_search=cfg.index.hnsw_ef_search,
+                                                  ivfflat_probes=cfg.index.ivfflat_probes)
             evaluation_indexes.append(native_index)
         if args.reference_index:
             reference_index = _load_evaluation_index(args.reference_index, cfg.index.backend, cfg.index.metric, docs.documents,
                                                      engine.source_model.dimension, cfg.index.collection, cfg.index.url,
-                                                     cfg.index.vector_name, cfg.index.api_key_env, cfg.index.nprobe)
+                                                     cfg.index.vector_name, cfg.index.api_key_env, cfg.index.nprobe,
+                                                     dsn_env=cfg.index.dsn_env, schema=cfg.index.schema, table=cfg.index.table,
+                                                     id_column=cfg.index.id_column, vector_column=cfg.index.vector_column,
+                                                     text_column=cfg.index.text_column, hnsw_ef_search=cfg.index.hnsw_ef_search,
+                                                     ivfflat_probes=cfg.index.ivfflat_probes)
             evaluation_indexes.append(reference_index)
         k_values = _parse_k_values(args.k_values or ",".join(map(str, cfg.probe.k_values)))
         if native_rankings is not None:
@@ -565,8 +607,17 @@ def _parse_k_values(value: str) -> list[int]:
 
 def _load_evaluation_index(path: str, backend: str, metric: str, documents: dict[str, str], dimension: int,
                            collection: str, url: str | None, vector_name: str | None = None,
-                           api_key_env: str | None = "QDRANT_API_KEY", nprobe: int | None = None):
-    from .indexes import FaissIndex, NumpyIndex, QdrantIndex
+                           api_key_env: str | None = "QDRANT_API_KEY", nprobe: int | None = None,
+                           *, dsn_env: str | None = "EMBEDFLOW_PGVECTOR_DSN", schema: str = "public",
+                           table: str = "documents", id_column: str = "id", vector_column: str = "embedding",
+                           text_column: str | None = "content", hnsw_ef_search: int | None = None,
+                           ivfflat_probes: int | None = None):
+    from .indexes import FaissIndex, NumpyIndex, PgVectorIndex, QdrantIndex
+    if backend == "pgvector":
+        return PgVectorIndex.connect(url or None, dsn_env=dsn_env, schema=schema, table=table,
+                                     id_column=id_column, vector_column=vector_column, text_column=text_column,
+                                     dimension=dimension, metric=metric, hnsw_ef_search=hnsw_ef_search,
+                                     ivfflat_probes=ivfflat_probes)
     if backend == "qdrant":
         return QdrantIndex.connect(url or path, collection, dimension, documents=documents, metric=metric,
                                    vector_name=vector_name, api_key_env=api_key_env)
@@ -584,7 +635,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     checks: list[dict[str, Any]] = []
     version = sys.version_info
     checks.append({"name": "python", "ok": version >= (3, 10), "detail": platform.python_version()})
-    for module, label in (("numpy", "NumPy"), ("yaml", "PyYAML"), ("faiss", "FAISS"), ("torch", "PyTorch"), ("fastapi", "FastAPI"), ("qdrant_client", "qdrant-client")):
+    for module, label in (("numpy", "NumPy"), ("yaml", "PyYAML"), ("faiss", "FAISS"), ("torch", "PyTorch"),
+                          ("fastapi", "FastAPI"), ("qdrant_client", "qdrant-client"), ("psycopg", "psycopg")):
         available = importlib.util.find_spec(module) is not None
         checks.append({"name": label.lower().replace("-", "_"), "ok": available, "detail": "installed" if available else "not installed (optional where noted)"})
     checks.append({"name": "cuda", "ok": True, "detail": _cuda_detail()})
@@ -593,16 +645,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         try:
             config = load_config(args.config)
             checks.append({"name": "config", "ok": True, "detail": str(Path(args.config).resolve())})
-            checks.append({"name": "documents", "ok": Path(config.documents.path).exists(), "detail": config.documents.path})
+            pgvector_backend = config.index.backend.lower() == "pgvector"
+            documents_available = Path(config.documents.path).exists() or pgvector_backend
+            checks.append({"name": "documents", "ok": documents_available,
+                           "detail": "resolved from pgvector table" if pgvector_backend and not Path(config.documents.path).exists() else config.documents.path})
             qdrant_endpoint = config.index.url or config.index.path
             index_exists = (Path(config.index.path).exists() if config.index.backend.lower() == "faiss"
-                            else bool(config.index.url or "://" in str(qdrant_endpoint) or Path(config.index.path).exists()))
-            checks.append({"name": "index", "ok": index_exists, "detail": config.index.path})
+                            else bool(config.index.url or (config.index.dsn_env and os.environ.get(config.index.dsn_env))) if pgvector_backend else
+                            bool(config.index.url or "://" in str(qdrant_endpoint) or Path(config.index.path).exists()))
+            checks.append({"name": "index", "ok": index_exists,
+                           "detail": "configured pgvector table" if pgvector_backend else config.index.path})
             normalization_ok = not (config.index.metric.lower() == "cosine" and
                                     (config.source.normalization.lower() != "l2" or config.target.normalization.lower() != "l2"))
             checks.append({"name": "normalization", "ok": normalization_ok,
                            "detail": f"metric={config.index.metric}; source={config.source.normalization}; target={config.target.normalization}"})
-            if Path(config.documents.path).exists():
+            if Path(config.documents.path).exists() and not pgvector_backend:
                 docs = DocumentStore(config.documents.path, config.documents.id_field, config.documents.text_field)
                 checks.append({"name": "document_rows", "ok": docs.size() > 0, "detail": f"{docs.size():,} rows"})
             if config.index.backend.lower() == "faiss" and Path(config.index.path).exists():
@@ -629,6 +686,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                                    "detail": "matches source contract" if fingerprint_ok else "does not match source contract"})
                 except Exception as exc:
                     checks.append({"name": "index_integrity", "ok": False, "detail": str(exc)})
+            if pgvector_backend and index_exists:
+                try:
+                    from .indexes import PgVectorIndex
+                    pg_index = PgVectorIndex.from_config(config)
+                    audit = pg_index.audit()
+                    checks.append({"name": "pgvector_connection", "ok": bool(audit.get("ok")),
+                                   "detail": f"{config.index.schema}.{config.index.table}" if audit.get("ok") else str(audit.get("checks", {}))})
+                    pg_index.close()
+                except Exception as exc:
+                    checks.append({"name": "pgvector_integrity", "ok": False, "detail": str(exc)})
             cache_path = Path(config.cache.path)
             if cache_path.exists():
                 try:
@@ -645,7 +712,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             checks.append({"name": "target_fingerprint", "ok": True, "detail": config.target.fingerprint[:16]})
         except Exception as exc:
             checks.append({"name": "config", "ok": False, "detail": str(exc)})
-    optional_checks = {"faiss", "qdrant_client", "fastapi", "torch", "pytorch"}
+    optional_checks = {"faiss", "qdrant_client", "fastapi", "torch", "pytorch", "psycopg"}
     failed = [check for check in checks if not check["ok"] and check["name"] not in optional_checks]
     if args.json:
         _json({"checks": checks, "status": "FAIL" if failed else "PASS"})
@@ -853,12 +920,16 @@ def _format_cost(value: Any) -> str:
 
 
 def cmd_audit_index(args: argparse.Namespace) -> int:
-    cfg = load_config(args.config); engine = open_engine(args.config, device=_normalize_device(args.device), demo=args.demo, start_worker=False)
+    cfg = load_config(args.config); engine = open_engine(args.config, device=_normalize_device(args.device), demo=args.demo, start_worker=False,
+                                                          allow_empty_index=True)
     reference = None
     try:
         meta = engine.source_index.metadata(); result = {"candidate_compatibility": engine.plan.diagnostic, "ann_status": "UNKNOWN",
                   "index": meta, "checks": {"dimension_match": True, "metric": cfg.index.metric, "corpus_documents": engine.documents.size()},
                   "note": "ANN recall is UNKNOWN until an exact/reference index or saved reference candidates are supplied."}
+        if cfg.index.backend.lower() == "pgvector":
+            result["pgvector_audit"] = engine.source_index.audit()
+            result["checks"]["pgvector"] = bool(result["pgvector_audit"].get("ok"))
         if args.reference_index and args.queries:
             from .indexes import FaissIndex, NumpyIndex
             try: reference = FaissIndex.load(args.reference_index, metric=cfg.index.metric,
@@ -1063,18 +1134,26 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="embedflow", description="Progressive embedding-model migration")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
-    init = sub.add_parser("init", help="create or validate an EmbedFlow YAML configuration"); init.add_argument("--config", default="embedflow.yaml"); init.add_argument("--source-model"); init.add_argument("--target-model"); init.add_argument("--documents"); init.add_argument("--index"); init.add_argument("--cache"); init.add_argument("--queries", help="optional JSONL probe queries to run during initialization"); init.add_argument("--kmax", type=int); init.add_argument("--backend", choices=["faiss", "qdrant"], default="faiss"); init.add_argument("--dimension", type=int, default=64); init.add_argument("--build-index", action="store_true"); init.add_argument("--device", default="cpu"); init.add_argument("--demo", action="store_true"); init.set_defaults(func=cmd_init)
+    init = sub.add_parser("init", help="create or validate an EmbedFlow YAML configuration"); init.add_argument("--config", default="embedflow.yaml"); init.add_argument("--source-model"); init.add_argument("--target-model"); init.add_argument("--documents"); init.add_argument("--index"); init.add_argument("--cache"); init.add_argument("--queries", help="optional JSONL probe queries to run during initialization"); init.add_argument("--kmax", type=int); init.add_argument("--backend", choices=["faiss", "qdrant", "pgvector"], default="faiss"); init.add_argument("--dimension", type=int, default=64); init.add_argument("--build-index", action="store_true"); init.add_argument("--device", default="cpu"); init.add_argument("--demo", action="store_true"); init.set_defaults(func=cmd_init)
     migrate_cmd = sub.add_parser("migrate", help="connect an existing index and start progressive migration")
-    migrate_cmd.add_argument("--index", required=True, help="FAISS index path, or Qdrant path/URL")
-    migrate_cmd.add_argument("--documents", required=True, help="JSONL document store with id/text fields")
+    migrate_cmd.add_argument("--index", required=True, help="FAISS index path, Qdrant path/URL, or pgvector DSN")
+    migrate_cmd.add_argument("--documents", help="JSONL document store with id/text fields; pgvector can read its text_column")
     migrate_cmd.add_argument("--old-model", required=True, help="source/legacy embedding model ID or local path")
     migrate_cmd.add_argument("--new-model", required=True, help="target embedding model ID or local path")
-    migrate_cmd.add_argument("--backend", choices=["faiss", "qdrant"])
+    migrate_cmd.add_argument("--backend", choices=["faiss", "qdrant", "pgvector"])
     migrate_cmd.add_argument("--index-url", help="optional Qdrant URL (otherwise --index is used)")
     migrate_cmd.add_argument("--collection", default="embedflow")
     migrate_cmd.add_argument("--vector-name", help="Qdrant named-vector key, when the collection uses named vectors")
     migrate_cmd.add_argument("--api-key-env", default="QDRANT_API_KEY", help="environment variable containing a Qdrant API key")
-    migrate_cmd.add_argument("--metric", choices=["cosine", "dot", "inner_product"], default="cosine")
+    migrate_cmd.add_argument("--dsn-env", default="EMBEDFLOW_PGVECTOR_DSN", help="pgvector DSN environment variable")
+    migrate_cmd.add_argument("--schema", default="public", help="pgvector schema")
+    migrate_cmd.add_argument("--table", default="documents", help="pgvector table")
+    migrate_cmd.add_argument("--id-column", default="id", help="pgvector ID column")
+    migrate_cmd.add_argument("--vector-column", default="embedding", help="pgvector vector column")
+    migrate_cmd.add_argument("--text-column", default="content", help="pgvector text column")
+    migrate_cmd.add_argument("--hnsw-ef-search", type=int)
+    migrate_cmd.add_argument("--ivfflat-probes", type=int)
+    migrate_cmd.add_argument("--metric", choices=["cosine", "dot", "inner_product", "l2", "euclidean"], default="cosine")
     migrate_cmd.add_argument("--model-root", help="directory containing staged research model snapshots")
     migrate_cmd.add_argument("--config", default="./embedflow.yaml", help="where to save the generated migration config")
     migrate_cmd.add_argument("--cache", default="./embedflow_cache")
@@ -1095,13 +1174,21 @@ def build_parser() -> argparse.ArgumentParser:
     analyze = sub.add_parser("analyze", help="run the no-target-index finite-tail/T2-v1 diagnostic")
     analyze.add_argument("--config", help="existing EmbedFlow YAML config")
     analyze.add_argument("--documents", help="JSONL document store for direct analysis")
-    analyze.add_argument("--index", help="existing FAISS/Numpy index for direct analysis")
+    analyze.add_argument("--index", help="existing FAISS/Numpy index, Qdrant endpoint, or pgvector DSN for direct analysis")
     analyze.add_argument("--index-ids", help="optional FAISS ID sidecar path (defaults to <index>.ids.json)")
-    analyze.add_argument("--backend", choices=["faiss", "qdrant"], default="faiss")
-    analyze.add_argument("--metric", choices=["cosine", "dot", "inner_product"], default="cosine")
+    analyze.add_argument("--backend", choices=["faiss", "qdrant", "pgvector"], default=None)
+    analyze.add_argument("--metric", choices=["cosine", "dot", "inner_product", "l2", "euclidean"], default="cosine")
     analyze.add_argument("--collection", default="embedflow", help="Qdrant collection for direct analysis")
     analyze.add_argument("--vector-name", help="Qdrant named-vector key")
     analyze.add_argument("--api-key-env", default="QDRANT_API_KEY", help="Qdrant API-key environment variable")
+    analyze.add_argument("--dsn-env", default="EMBEDFLOW_PGVECTOR_DSN", help="pgvector DSN environment variable")
+    analyze.add_argument("--schema", default="public", help="pgvector schema")
+    analyze.add_argument("--table", default="documents", help="pgvector table")
+    analyze.add_argument("--id-column", default="id", help="pgvector ID column")
+    analyze.add_argument("--vector-column", default="embedding", help="pgvector vector column")
+    analyze.add_argument("--text-column", default="content", help="pgvector text column")
+    analyze.add_argument("--hnsw-ef-search", type=int)
+    analyze.add_argument("--ivfflat-probes", type=int)
     analyze.add_argument("--source-model", help="legacy/source model ID or local path")
     analyze.add_argument("--target-model", help="desired target model ID or local path")
     analyze.add_argument("--model-root", help="directory containing staged model snapshots")

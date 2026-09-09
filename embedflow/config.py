@@ -130,6 +130,16 @@ class IndexConfig:
     ids: str | None = None
     vector_name: str | None = None
     api_key_env: str | None = "QDRANT_API_KEY"
+    # pgvector settings. ``url`` is accepted as an explicit DSN for callers
+    # that already manage secrets; YAML deployments should use ``dsn_env``.
+    dsn_env: str | None = "EMBEDFLOW_PGVECTOR_DSN"
+    schema: str = "public"
+    table: str = "documents"
+    id_column: str = "id"
+    vector_column: str = "embedding"
+    text_column: str | None = "content"
+    hnsw_ef_search: int | None = None
+    ivfflat_probes: int | None = None
 
 
 @dataclass
@@ -198,7 +208,7 @@ class EmbedFlowConfig:
                           (self.cache, "path"), (self, "state_path"),
                           (self.telemetry, "latency_log")):
             raw_value = str(getattr(obj, attr))
-            # A Qdrant URL is a connection endpoint, not a filesystem path.
+            # A remote endpoint/DSN is a connection endpoint, not a filesystem path.
             # Leave it untouched so ``index: {backend: qdrant, path: https://…}``
             # works even when no separate ``url`` field is supplied.
             if "://" in raw_value:
@@ -234,10 +244,27 @@ class EmbedFlowConfig:
                 raise ValueError(f"{label}.normalization must be l2, none, or identity")
         if self.source.fingerprint == self.target.fingerprint:
             raise ValueError("source and target embedding contracts must differ for migration")
-        if not isinstance(self.index.backend, str) or self.index.backend.lower() not in {"faiss", "qdrant"}:
-            raise ValueError("index.backend must be faiss or qdrant")
-        if not isinstance(self.index.metric, str) or self.index.metric.lower() not in {"cosine", "dot", "inner_product"}:
-            raise ValueError("index.metric must be cosine, dot, or inner_product")
+        backend = self.index.backend.lower() if isinstance(self.index.backend, str) else ""
+        if backend not in {"faiss", "qdrant", "pgvector"}:
+            raise ValueError("index.backend must be faiss, qdrant, or pgvector")
+        allowed_metrics = {"cosine", "dot", "inner_product"}
+        if backend == "pgvector":
+            allowed_metrics |= {"l2", "euclidean"}
+        if not isinstance(self.index.metric, str) or self.index.metric.lower() not in allowed_metrics:
+            names = "cosine, dot, inner_product" + (", l2, or euclidean" if backend == "pgvector" else "")
+            raise ValueError(f"index.metric must be {names}")
+        if backend == "pgvector":
+            for label, value in (("index.schema", self.index.schema), ("index.table", self.index.table),
+                                 ("index.id_column", self.index.id_column), ("index.vector_column", self.index.vector_column)):
+                if not isinstance(value, str) or not value.strip() or "\x00" in value:
+                    raise ValueError(f"{label} must be a non-empty string without NUL bytes")
+            if self.index.text_column is not None and (not isinstance(self.index.text_column, str) or
+                                                        not self.index.text_column.strip() or "\x00" in self.index.text_column):
+                raise ValueError("index.text_column must be null or a non-empty string without NUL bytes")
+            if self.index.dsn_env is not None and (not isinstance(self.index.dsn_env, str) or not self.index.dsn_env.strip()):
+                raise ValueError("index.dsn_env must be a non-empty environment-variable name")
+            self.index.hnsw_ef_search = None if self.index.hnsw_ef_search is None else _integer(self.index.hnsw_ef_search, "index.hnsw_ef_search", minimum=1)
+            self.index.ivfflat_probes = None if self.index.ivfflat_probes is None else _integer(self.index.ivfflat_probes, "index.ivfflat_probes", minimum=1)
         candidate_depth = self.migration.candidate_depth
         if isinstance(candidate_depth, str) and candidate_depth.strip().lower() == "auto":
             candidate_depth = "auto"
@@ -410,6 +437,12 @@ def _apply_environment_overrides(cfg: EmbedFlowConfig) -> None:
         "EMBEDFLOW_INDEX_COLLECTION": (cfg.index, "collection"),
         "EMBEDFLOW_INDEX_VECTOR_NAME": (cfg.index, "vector_name"),
         "EMBEDFLOW_QDRANT_API_KEY_ENV": (cfg.index, "api_key_env"),
+        "EMBEDFLOW_PGVECTOR_DSN_ENV": (cfg.index, "dsn_env"),
+        "EMBEDFLOW_PGVECTOR_SCHEMA": (cfg.index, "schema"),
+        "EMBEDFLOW_PGVECTOR_TABLE": (cfg.index, "table"),
+        "EMBEDFLOW_PGVECTOR_ID_COLUMN": (cfg.index, "id_column"),
+        "EMBEDFLOW_PGVECTOR_VECTOR_COLUMN": (cfg.index, "vector_column"),
+        "EMBEDFLOW_PGVECTOR_TEXT_COLUMN": (cfg.index, "text_column"),
         "EMBEDFLOW_DOCUMENTS_PATH": (cfg.documents, "path"),
         "EMBEDFLOW_CACHE_PATH": (cfg.cache, "path"),
         "EMBEDFLOW_STATE_PATH": (cfg, "state_path"),
@@ -436,6 +469,8 @@ def _apply_environment_overrides(cfg: EmbedFlowConfig) -> None:
         ("EMBEDFLOW_BACKGROUND_BATCH_SIZE", cfg.migration, "background_batch_size"),
         ("EMBEDFLOW_PROBE_KMAX", cfg.probe, "kmax"),
         ("EMBEDFLOW_INDEX_NPROBE", cfg.index, "nprobe"),
+        ("EMBEDFLOW_PGVECTOR_HNSW_EF_SEARCH", cfg.index, "hnsw_ef_search"),
+        ("EMBEDFLOW_PGVECTOR_IVFFLAT_PROBES", cfg.index, "ivfflat_probes"),
     ):
         value = os.environ.get(variable)
         if value is not None and value.strip():

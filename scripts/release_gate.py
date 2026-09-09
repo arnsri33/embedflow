@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the EmbedFlow v0.1.0 release gate without publishing anything.
+"""Run the EmbedFlow v0.2.0 release gate without publishing anything.
 
 The gate deliberately records unavailable optional interpreters/dependencies as
 expected skips, while failing on code, registry, packaging, documentation, or
@@ -326,6 +326,23 @@ def main() -> int:
         sys.path.insert(0, str(ROOT))
     test_result = run_check("public pytest suite", [sys.executable, "-m", "pytest", "-q"], env=python_env(), timeout=600)
     test_counts = parse_test_counts(((test_result.stdout if test_result else "") or "") + ((test_result.stderr if test_result else "") or ""))
+    pgvector_result = run_check(
+        "pgvector Docker integration",
+        [sys.executable, "-m", "pytest", "-q", "tests/test_pgvector_docker.py"],
+        env=python_env(),
+        timeout=900,
+    )
+    if pgvector_result and pgvector_result.returncode == 0:
+        pgvector_output = (pgvector_result.stdout or "") + (pgvector_result.stderr or "")
+        # Pytest exits zero for a skipped test. Preserve that distinction in
+        # the release report instead of presenting an unavailable database
+        # daemon as a passing integration run.
+        if re.search(r"\b\d+ skipped\b", pgvector_output) and not re.search(r"\b\d+ passed\b", pgvector_output):
+            CHECKS[-1].status = "SKIP"
+            CHECKS[-1].detail = next(
+                (line.strip() for line in pgvector_output.splitlines() if "Docker unavailable" in line or "set EMBEDFLOW_RUN_PGVECTOR_DOCKER" in line),
+                "Docker integration was skipped",
+            )
 
     ruff = shutil.which("ruff")
     if ruff:
@@ -414,7 +431,7 @@ def main() -> int:
     dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, text=True, capture_output=True).stdout.strip())
     commit_label = f"{commit} (working tree has uncommitted changes)" if dirty else commit
     report_lines = [
-        "# EmbedFlow v0.1.0 Release Test Report", "",
+        "# EmbedFlow v0.2.0 Release Test Report", "",
         f"- Generated: {time.strftime('%Y-%m-%d %H:%M:%S %z')}",
         f"- Python running gate: {sys.version.split()[0]}",
         "- Repository: `embedflow` (local release checkout)",

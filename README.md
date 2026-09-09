@@ -7,7 +7,7 @@
 EmbedFlow lets a new embedding model serve over candidates from an existing
 vector index while target document vectors are materialized progressively. It
 supports migration analysis, persistent caching, background work, and serving
-through FAISS, Qdrant, a CLI, and FastAPI.
+through FAISS, Qdrant, pgvector, a CLI, and FastAPI.
 
 [Quickstart](#try-it) · [Documentation](#documentation) · [Research](#research)
 
@@ -189,11 +189,13 @@ is measured separately and is `UNKNOWN` until an exact reference is supplied.
 | --- | --- |
 | FAISS | Supported |
 | Qdrant | Supported |
+| pgvector | Supported |
 
 Backend-specific setup and examples:
 
 - [FAISS](https://github.com/arnsri33/embedflow/blob/main/docs/integrations/faiss.md)
 - [Qdrant](https://github.com/arnsri33/embedflow/blob/main/docs/integrations/qdrant.md)
+- [pgvector](https://github.com/arnsri33/embedflow/blob/main/docs/integrations/pgvector.md)
 - [Adding a backend](https://github.com/arnsri33/embedflow/blob/main/CONTRIBUTING.md)
 
 ## CLI
@@ -204,7 +206,7 @@ embedflow analyze --help
 embedflow serve --config ./embedflow.yaml
 embedflow status --config ./embedflow.yaml
 embedflow registry list
-embedflow economics --corpus-size 1000000000 --docs-per-second 106.98 --gpu-price 3.29
+embedflow economics --corpus-size 1000000000 --docs-per-second 100 --gpu-price 3.29
 embedflow doctor --config ./embedflow.yaml
 ```
 
@@ -228,7 +230,7 @@ OpenAPI documentation; see
 
 ## Status
 
-EmbedFlow v0.1.0 is an alpha release for research and early real-world
+EmbedFlow v0.2.0 is an alpha release for research and early real-world
 testing.
 
 - T2-v1 reports an empirical finite-tail diagnostic.

@@ -1,10 +1,11 @@
 include README.md README_PYPI.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md CITATION.cff requirements.txt requirements-dev.txt
 recursive-include docs *
-recursive-include examples *.md *.yaml *.json *.jsonl *.py
+recursive-include examples *.md *.yaml *.json *.jsonl *.py *.sql *.sh
 recursive-include scripts *.sh *.py
 recursive-include frozen *.md *.sha256
 prune .github
 prune tests
+prune examples/*/runtime
 global-exclude __pycache__
 global-exclude *.py[cod]
 global-exclude *.index *.npy *.npz *.sqlite *.sqlite3 *.db
