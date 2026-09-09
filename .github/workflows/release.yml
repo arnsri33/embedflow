@@ -29,7 +29,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install package and development dependencies
-        run: python -m pip install -e ".[dev]"
+        run: python -m pip install -e ".[dev,pgvector]"
       - name: Lint
         run: ruff check .
       - name: Test
@@ -50,7 +50,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install package and release tooling
-        run: python -m pip install -e ".[dev,faiss,qdrant,dashboard]"
+        run: python -m pip install -e ".[dev,faiss,qdrant,pgvector,dashboard]"
       - name: Run full release gate
         run: python scripts/release_gate.py
 
