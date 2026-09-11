@@ -1,12 +1,12 @@
 """EmbedFlow: progressive embedding-model migration for existing indexes."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from .config import EmbedFlowConfig, load_config
 
 
 def migrate(*args, **kwargs):
-    """Start progressive migration over an existing FAISS, Qdrant, or pgvector index.
+    """Start progressive migration over an existing FAISS, Qdrant, pgvector, or Pinecone index.
 
     Imported lazily to keep the lightweight configuration package free of
     model-serving dependencies at import time.  See ``embedflow.migration``

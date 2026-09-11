@@ -1,0 +1,35 @@
+source:
+  model: sentence-transformers/all-MiniLM-L6-v2
+  dimension: 384
+  device: cuda
+
+target:
+  model: Qwen/Qwen3-Embedding-0.6B
+  device: cuda
+
+index:
+  backend: pinecone
+  api_key_env: PINECONE_API_KEY
+  # Use the host copied from the Pinecone console, or set
+  # EMBEDFLOW_PINECONE_HOST to override this value at runtime.
+  host: my-index-xxxxx.svc.aped-xxxx.pinecone.io
+  namespace: production
+  metric: cosine
+  # Use this when text is stored in Pinecone metadata:
+  # text_metadata_field: text
+
+documents:
+  # Point this at your existing external text store, or remove it when
+  # text_metadata_field is configured above.
+  path: ./documents.jsonl
+  id_field: id
+  text_field: text
+
+migration:
+  candidate_depth: 50
+  max_sync_misses: 4
+  background_batch_size: 32
+
+cache:
+  path: ./runtime/cache
+state_path: ./runtime/state.json

@@ -2,7 +2,7 @@
 
 The research implementation deliberately exposes the lower-level config and
 engine objects.  This module adds the short path a user needs in an
-application: point EmbedFlow at an existing FAISS/Qdrant index, name the old
+application: point EmbedFlow at an existing FAISS, Qdrant, pgvector, or Pinecone index, name the old
 and new embedding models, and receive a serving session.  All retrieval,
 cache, worker, and probe behavior is delegated to the existing implementation;
 this is not a second query path.
@@ -27,7 +27,7 @@ from ..config import (
     hydrate_research_contract,
     save_config,
 )
-from ..indexes import PgVectorDocumentStore, PgVectorIndex
+from ..indexes import PgVectorDocumentStore, PgVectorIndex, PineconeDocumentStore, PineconeIndex
 from ..indexes.base import VectorIndex
 from ..migration.compatibility import run_probe, save_probe
 from ..migration.state import DocumentStore
@@ -50,6 +50,8 @@ def _infer_backend(index_value: str, explicit: str | None = None) -> str:
     lowered = str(index_value).strip().lower()
     if lowered.startswith(("postgresql://", "postgres://")):
         return "pgvector"
+    if ".pinecone.io" in lowered:
+        return "pinecone"
     if "://" in lowered:
         return "qdrant"
     return "faiss"
@@ -187,7 +189,7 @@ def migrate(
     index: str | Path | VectorIndex,
     old_model: str | Path | EmbeddingModel,
     new_model: str | Path | EmbeddingModel,
-    documents: str | Path | DocumentStore | PgVectorDocumentStore | None = None,
+    documents: str | Path | DocumentStore | PgVectorDocumentStore | PineconeDocumentStore | None = None,
     backend: str | None = None,
     index_url: str | None = None,
     collection: str = "embedflow",
@@ -201,6 +203,10 @@ def migrate(
     text_column: str | None = "content",
     hnsw_ef_search: int | None = None,
     ivfflat_probes: int | None = None,
+    host: str | None = None,
+    index_name: str | None = None,
+    namespace: str = "",
+    text_metadata_field: str | None = None,
     metric: str = "cosine",
     model_root: str | Path | None = None,
     device: str | None = None,
@@ -218,14 +224,14 @@ def migrate(
     """Start progressive migration over an existing index.
 
     ``index`` may be an existing EmbedFlow ``VectorIndex`` instance or a path
-    to a FAISS index, Qdrant path/URL, or pgvector DSN.  Model
+    to a FAISS index, Qdrant path/URL, pgvector DSN, or Pinecone host.  Model
     strings are revision-hydrated when they are registered by the research
     contract; model objects can be supplied by an application directly.
     ``probe_queries`` is optional so serving can start immediately.  When
     supplied, the existing frozen T2-v1 implementation is run before the
     session is returned.
     """
-    if isinstance(documents, (DocumentStore, PgVectorDocumentStore)):
+    if isinstance(documents, (DocumentStore, PgVectorDocumentStore, PineconeDocumentStore)):
         document_store = documents
     elif documents is None:
         document_store = None
@@ -256,8 +262,8 @@ def migrate(
         else:
             index_path = str(index_url or index)
             index_backend = _infer_backend(index_path, backend)
-            if index_backend not in {"faiss", "qdrant", "pgvector"}:
-                raise ValueError("backend must be faiss, qdrant, or pgvector")
+            if index_backend not in {"faiss", "qdrant", "pgvector", "pinecone"}:
+                raise ValueError("backend must be faiss, qdrant, pgvector, or pinecone")
 
         explicit_url = index_url
         if index_backend == "pgvector" and explicit_url is None and "://" in index_path:
@@ -272,8 +278,20 @@ def migrate(
             os.environ[str(dsn_env).strip()] = explicit_url
             explicit_url = None
             index_path = "./legacy.index"
-        if document_store is None and index_backend != "pgvector":
-            raise ValueError("documents is required for FAISS and Qdrant; pgvector can resolve text from its text_column")
+        pinecone_host = host
+        pinecone_index_name = index_name
+        if index_backend == "pinecone":
+            # A host supplied through the generic ``index`` argument is
+            # accepted for parity with the other backends, but is never saved
+            # as a filesystem path in generated YAML.
+            if pinecone_host is None and index_path and ".pinecone.io" in index_path.lower():
+                pinecone_host = index_path
+            index_path = "./legacy.index"
+            explicit_url = None
+            if not api_key_env or api_key_env == "QDRANT_API_KEY":
+                api_key_env = "PINECONE_API_KEY"
+        if document_store is None and index_backend not in {"pgvector", "pinecone"}:
+            raise ValueError("documents is required for FAISS and Qdrant; pgvector/Pinecone can resolve text from their configured text fields")
         cfg = EmbedFlowConfig(
             source=source_cfg,
             target=target_cfg,
@@ -281,7 +299,9 @@ def migrate(
                               url=explicit_url, metric=str(metric), vector_name=vector_name,
                               api_key_env=api_key_env, dsn_env=dsn_env, schema=schema, table=table,
                               id_column=id_column, vector_column=vector_column, text_column=text_column,
-                              hnsw_ef_search=hnsw_ef_search, ivfflat_probes=ivfflat_probes),
+                              hnsw_ef_search=hnsw_ef_search, ivfflat_probes=ivfflat_probes,
+                              host=pinecone_host, index_name=pinecone_index_name,
+                              namespace=namespace, text_metadata_field=text_metadata_field),
             documents=DocumentsConfig(path=str(document_store.path) if document_store is not None else "./documents.jsonl"),
             migration=MigrationConfig(candidate_depth=int(candidate_depth), kmax_probe=max(int(kmax_probe), int(candidate_depth)),
                                       max_sync_misses=int(max_sync_misses), background_batch_size=int(background_batch_size)),
@@ -295,14 +315,21 @@ def migrate(
 
         if owns_index:
             if document_store is None:
-                source_index = PgVectorIndex.from_config(cfg)
-                document_store = PgVectorDocumentStore(source_index, text_field=cfg.index.text_column or "content", owns_index=False)
+                if index_backend == "pinecone":
+                    source_index = PineconeIndex.from_config(cfg)
+                    document_store = PineconeDocumentStore(source_index, text_field=cfg.index.text_metadata_field, owns_index=False)
+                else:
+                    source_index = PgVectorIndex.from_config(cfg)
+                    document_store = PgVectorDocumentStore(source_index, text_field=cfg.index.text_column or "content", owns_index=False)
             else:
                 source_index = load_index(cfg, document_store)
         elif document_store is None:
-            if not isinstance(source_index, PgVectorIndex):
-                raise ValueError("documents is required unless the supplied index is a pgvector backend")
-            document_store = PgVectorDocumentStore(source_index, text_field=cfg.index.text_column or "content", owns_index=False)
+            if isinstance(source_index, PgVectorIndex):
+                document_store = PgVectorDocumentStore(source_index, text_field=cfg.index.text_column or "content", owns_index=False)
+            elif isinstance(source_index, PineconeIndex):
+                document_store = PineconeDocumentStore(source_index, text_field=cfg.index.text_metadata_field, owns_index=False)
+            else:
+                raise ValueError("documents is required unless the supplied index is a pgvector or Pinecone backend")
         if int(source_index.dimension) != int(source_model.dimension):
             raise ValueError(f"source model dimension {source_model.dimension} != existing index dimension {source_index.dimension}")
         stored_fingerprint = source_index.metadata().get("model_fingerprint")

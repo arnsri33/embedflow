@@ -11,7 +11,7 @@ python -m pip install -e '.[dev]'
 ```
 
 Optional integrations can be installed with `.[faiss]`, `.[qdrant]`,
-`.[models]`, or `.[dashboard]`.
+`.[pgvector]`, `.[pinecone]`, `.[models]`, or `.[dashboard]`.
 
 ## Checks before opening a pull request
 

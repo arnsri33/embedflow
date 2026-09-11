@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the EmbedFlow v0.2.0 release gate without publishing anything.
+"""Run the EmbedFlow v0.3.0 release gate without publishing anything.
 
 The gate deliberately records unavailable optional interpreters/dependencies as
 expected skips, while failing on code, registry, packaging, documentation, or
@@ -205,7 +205,12 @@ def fresh_wheel_smoke(wheel: Path) -> tuple[bool, str]:
             venv.EnvBuilder(with_pip=True, system_site_packages=True).create(env_dir)
             py = env_dir / "bin" / "python"
             scripts = env_dir / "bin"
-            install = subprocess.run([str(py), "-m", "pip", "install", "--no-deps", str(wheel)], cwd=root, text=True, capture_output=True, timeout=180)
+            # ``system_site_packages=True`` keeps this offline release check
+            # lightweight, but it can already contain the same EmbedFlow
+            # version. Force-install the artifact so the console script and
+            # package files being tested always come from this wheel rather
+            # than being silently satisfied by the host environment.
+            install = subprocess.run([str(py), "-m", "pip", "install", "--no-deps", "--force-reinstall", str(wheel)], cwd=root, text=True, capture_output=True, timeout=180)
             if install.returncode:
                 return False, install.stdout + install.stderr
             for command in (["embedflow", "--help"], ["embedflow", "doctor", "--json"], ["embedflow", "registry", "verify"], ["embedflow", "demo", "--path", str(root / "demo"), "--no-serve"]):
@@ -431,7 +436,7 @@ def main() -> int:
     dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, text=True, capture_output=True).stdout.strip())
     commit_label = f"{commit} (working tree has uncommitted changes)" if dirty else commit
     report_lines = [
-        "# EmbedFlow v0.2.0 Release Test Report", "",
+        "# EmbedFlow v0.3.0 Release Test Report", "",
         f"- Generated: {time.strftime('%Y-%m-%d %H:%M:%S %z')}",
         f"- Python running gate: {sys.version.split()[0]}",
         "- Repository: `embedflow` (local release checkout)",
@@ -450,7 +455,7 @@ def main() -> int:
                          "## Python matrix", "", *[f"- Python {version}: **{status}**" for version, status in interpreters.items()],
                          "", "## Registry", "", f"Core registry rows: {registry_rows}", f"Benchmark profiles: {registry_profiles}", f"Research summaries: {registry_summaries}", f"Retained artifacts verified: {registry_artifacts}", f"Semantic values cross-checked: {registry_semantics}", "Provenance and packaged checksums are validated by `registry verify`.",
                          "", "## Security", "", "The source scan checks credentials, private keys, absolute local paths, and runtime artifacts. Manual metadata placeholders are a separate release blocker.",
-                         "", "## Notes", "", "Expected skips are unavailable Python interpreters or optional Qdrant dependencies. No GitHub or external deployment commands are executed by this script.", ""])
+                         "", "## Notes", "", "Expected skips are unavailable interpreters, optional research artifacts/dependencies, Docker or local-socket restrictions, and the opt-in remote Pinecone integration when credentials are absent. No GitHub or external deployment commands are executed by this script.", ""])
     (ROOT / "RELEASE_TEST_REPORT.md").write_text("\n".join(report_lines), encoding="utf-8")
     print("RELEASE GATE: " + ("FAIL" if failures else "PASS"))
     for check in CHECKS:

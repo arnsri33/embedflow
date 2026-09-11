@@ -6,13 +6,21 @@ from typing import Any
 
 from .cache import SQLiteVectorCache
 from .config import EmbedFlowConfig, load_config
-from .indexes import FaissIndex, NumpyIndex, PgVectorDocumentStore, PgVectorIndex, QdrantIndex
+from .indexes import (
+    FaissIndex,
+    NumpyIndex,
+    PgVectorDocumentStore,
+    PgVectorIndex,
+    PineconeDocumentStore,
+    PineconeIndex,
+    QdrantIndex,
+)
 from .migration.state import DocumentStore
 from .models import load_embedding_model
 from .serving.engine import MigrationEngine
 
 
-def load_documents(cfg: EmbedFlowConfig, index: Any | None = None) -> DocumentStore | PgVectorDocumentStore:
+def load_documents(cfg: EmbedFlowConfig, index: Any | None = None) -> DocumentStore | PgVectorDocumentStore | PineconeDocumentStore:
     """Load the configured document resolver.
 
     A pgvector table commonly stores both the legacy vector and document text.
@@ -21,7 +29,8 @@ def load_documents(cfg: EmbedFlowConfig, index: Any | None = None) -> DocumentSt
     store.  A JSONL path still takes precedence for deployments that keep text
     elsewhere.
     """
-    if cfg.index.backend.lower() == "pgvector" and not Path(cfg.documents.path).expanduser().exists():
+    backend = cfg.index.backend.lower()
+    if backend == "pgvector" and not Path(cfg.documents.path).expanduser().exists():
         pg_index = index if isinstance(index, PgVectorIndex) else PgVectorIndex.from_config(cfg)
         return PgVectorDocumentStore(
             pg_index,
@@ -29,14 +38,25 @@ def load_documents(cfg: EmbedFlowConfig, index: Any | None = None) -> DocumentSt
             text_field=cfg.index.text_column or cfg.documents.text_field,
             owns_index=index is None,
         )
+    if backend == "pinecone" and not Path(cfg.documents.path).expanduser().exists():
+        pinecone_index = index if isinstance(index, PineconeIndex) else PineconeIndex.from_config(cfg)
+        return PineconeDocumentStore(
+            pinecone_index,
+            text_field=cfg.index.text_metadata_field,
+            owns_index=index is None,
+        )
     return DocumentStore(cfg.documents.path, cfg.documents.id_field, cfg.documents.text_field)
 
 
-def load_index(cfg: EmbedFlowConfig, documents: DocumentStore | PgVectorDocumentStore):
+def load_index(cfg: EmbedFlowConfig, documents: DocumentStore | PgVectorDocumentStore | PineconeDocumentStore):
     if cfg.index.backend.lower() == "pgvector":
         if isinstance(documents, PgVectorDocumentStore):
             return documents.index
         return PgVectorIndex.from_config(cfg, documents=documents.documents)
+    if cfg.index.backend.lower() == "pinecone":
+        if isinstance(documents, PineconeDocumentStore):
+            return documents.index
+        return PineconeIndex.from_config(cfg, documents=documents.documents)
     metadata = documents.documents
     if cfg.index.backend.lower() == "faiss":
         try:

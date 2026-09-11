@@ -14,7 +14,7 @@ target:
   device: cuda
 
 index:
-  backend: faiss                 # faiss, qdrant, or pgvector
+  backend: faiss                 # faiss, qdrant, pgvector, or pinecone
   path: ./legacy.index
   ids: ./legacy.index.ids.json   # FAISS sidecar
   metric: cosine
@@ -22,6 +22,8 @@ index:
   # Qdrant fields: url, collection, vector_name, api_key_env
   # pgvector fields: dsn_env, schema, table, id_column, vector_column, text_column
   #                 hnsw_ef_search, ivfflat_probes
+  # Pinecone fields: host (preferred) or index_name, api_key_env, namespace,
+  #                  text_metadata_field
 
 documents:
   path: ./documents.jsonl
@@ -88,6 +90,11 @@ EMBEDFLOW_PGVECTOR_VECTOR_COLUMN
 EMBEDFLOW_PGVECTOR_TEXT_COLUMN
 EMBEDFLOW_PGVECTOR_HNSW_EF_SEARCH
 EMBEDFLOW_PGVECTOR_IVFFLAT_PROBES
+EMBEDFLOW_PINECONE_HOST
+EMBEDFLOW_PINECONE_INDEX_NAME
+EMBEDFLOW_PINECONE_NAMESPACE
+EMBEDFLOW_PINECONE_TEXT_METADATA_FIELD
+EMBEDFLOW_PINECONE_API_KEY_ENV
 EMBEDFLOW_INDEX_NPROBE
 EMBEDFLOW_DOCUMENTS_PATH
 EMBEDFLOW_CACHE_PATH

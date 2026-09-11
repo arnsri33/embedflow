@@ -140,6 +140,13 @@ class IndexConfig:
     text_column: str | None = "content"
     hnsw_ef_search: int | None = None
     ivfflat_probes: int | None = None
+    # Pinecone settings. Host is preferred for data-plane operations; an
+    # index_name is accepted for controlled/test environments and is resolved
+    # through the Pinecone control plane.
+    host: str | None = None
+    index_name: str | None = None
+    namespace: str = ""
+    text_metadata_field: str | None = None
 
 
 @dataclass
@@ -245,13 +252,15 @@ class EmbedFlowConfig:
         if self.source.fingerprint == self.target.fingerprint:
             raise ValueError("source and target embedding contracts must differ for migration")
         backend = self.index.backend.lower() if isinstance(self.index.backend, str) else ""
-        if backend not in {"faiss", "qdrant", "pgvector"}:
-            raise ValueError("index.backend must be faiss, qdrant, or pgvector")
+        if backend not in {"faiss", "qdrant", "pgvector", "pinecone"}:
+            raise ValueError("index.backend must be faiss, qdrant, pgvector, or pinecone")
         allowed_metrics = {"cosine", "dot", "inner_product"}
         if backend == "pgvector":
             allowed_metrics |= {"l2", "euclidean"}
+        if backend == "pinecone":
+            allowed_metrics |= {"dotproduct", "l2", "euclidean"}
         if not isinstance(self.index.metric, str) or self.index.metric.lower() not in allowed_metrics:
-            names = "cosine, dot, inner_product" + (", l2, or euclidean" if backend == "pgvector" else "")
+            names = "cosine, dot, inner_product" + (", dotproduct, l2, or euclidean" if backend == "pinecone" else ", l2, or euclidean" if backend == "pgvector" else "")
             raise ValueError(f"index.metric must be {names}")
         if backend == "pgvector":
             for label, value in (("index.schema", self.index.schema), ("index.table", self.index.table),
@@ -265,6 +274,19 @@ class EmbedFlowConfig:
                 raise ValueError("index.dsn_env must be a non-empty environment-variable name")
             self.index.hnsw_ef_search = None if self.index.hnsw_ef_search is None else _integer(self.index.hnsw_ef_search, "index.hnsw_ef_search", minimum=1)
             self.index.ivfflat_probes = None if self.index.ivfflat_probes is None else _integer(self.index.ivfflat_probes, "index.ivfflat_probes", minimum=1)
+        if backend == "pinecone":
+            if not any(isinstance(value, str) and value.strip() for value in (self.index.host, self.index.index_name, self.index.url)):
+                # ``path`` is accepted as a host by the adapter for old
+                # programmatic configs, but the explicit field is preferred.
+                path = str(self.index.path or "")
+                if ".pinecone.io" not in path and not path.startswith("https://"):
+                    raise ValueError("index.backend=pinecone requires a host or index_name")
+            for label, value in (("index.host", self.index.host), ("index.index_name", self.index.index_name),
+                                 ("index.api_key_env", self.index.api_key_env), ("index.text_metadata_field", self.index.text_metadata_field)):
+                if value is not None and (not isinstance(value, str) or not value.strip() or "\x00" in value):
+                    raise ValueError(f"{label} must be null or a non-empty string without NUL bytes")
+            if not isinstance(self.index.namespace, str) or "\x00" in self.index.namespace:
+                raise ValueError("index.namespace must be a string without NUL bytes")
         candidate_depth = self.migration.candidate_depth
         if isinstance(candidate_depth, str) and candidate_depth.strip().lower() == "auto":
             candidate_depth = "auto"
@@ -276,6 +298,11 @@ class EmbedFlowConfig:
         self.migration.probe_queries = _integer(self.migration.probe_queries, "migration.probe_queries", minimum=1)
         if candidate_depth != "auto" and self.migration.kmax_probe < int(candidate_depth):
             raise ValueError("migration.kmax_probe must be >= candidate_depth")
+        if backend == "pinecone":
+            if candidate_depth != "auto" and int(candidate_depth) > 10_000:
+                raise ValueError("Pinecone migration.candidate_depth must be <= 10000")
+            if self.migration.kmax_probe > 10_000:
+                raise ValueError("Pinecone migration.kmax_probe must be <= 10000")
         self.migration.max_sync_misses = _integer(self.migration.max_sync_misses, "migration.max_sync_misses", minimum=0)
         self.migration.background_batch_size = _integer(self.migration.background_batch_size, "migration.background_batch_size", minimum=1)
         self.migration.max_retries = _integer(self.migration.max_retries, "migration.max_retries", minimum=1)
@@ -284,6 +311,8 @@ class EmbedFlowConfig:
         self.probe.kmax = _integer(self.probe.kmax, "probe.kmax", minimum=10)
         if self.probe.kmax < 10:
             raise ValueError("probe.kmax must be at least 10")
+        if backend == "pinecone" and self.probe.kmax > 10_000:
+            raise ValueError("Pinecone probe.kmax must be <= 10000")
         if not self.probe.k_values:
             raise ValueError("probe.k_values must contain positive integers")
         try:
@@ -306,7 +335,7 @@ def _model(raw: dict[str, Any], fallback: str) -> ModelConfig:
     return ModelConfig(model=str(model), **raw)
 
 
-def from_dict(raw: dict[str, Any]) -> EmbedFlowConfig:
+def from_dict(raw: dict[str, Any], *, validate: bool = True) -> EmbedFlowConfig:
     if not isinstance(raw, Mapping):
         raise ValueError("configuration root must be a YAML object")
     raw = dict(raw or {})
@@ -315,10 +344,13 @@ def from_dict(raw: dict[str, Any]) -> EmbedFlowConfig:
     migration_raw = dict(raw.get("migration", {}))
     if isinstance(migration_raw.get("candidate_depth"), str) and migration_raw["candidate_depth"].strip().lower() == "auto":
         migration_raw["candidate_depth"] = "auto"
+    index_raw = dict(raw.get("index", {}))
+    if str(index_raw.get("backend", "faiss")).lower() == "pinecone" and "api_key_env" not in index_raw:
+        index_raw["api_key_env"] = "PINECONE_API_KEY"
     cfg = EmbedFlowConfig(
         source=source,
         target=target,
-        index=IndexConfig(**dict(raw.get("index", {}))),
+        index=IndexConfig(**index_raw),
         documents=DocumentsConfig(**dict(raw.get("documents", {}))),
         migration=MigrationConfig(**migration_raw),
         cache=CacheConfig(**dict(raw.get("cache", {}))),
@@ -328,7 +360,8 @@ def from_dict(raw: dict[str, Any]) -> EmbedFlowConfig:
         state_path=str(raw.get("state_path", "./embedflow_state.json")),
         dashboard_title=str(raw.get("dashboard_title", EmbedFlowConfig.__dataclass_fields__["dashboard_title"].default)),
     )
-    cfg.validate()
+    if validate:
+        cfg.validate()
     return cfg
 
 
@@ -413,7 +446,10 @@ def load_config(path: str | Path) -> EmbedFlowConfig:
         parsed = yaml.safe_load(path.read_text())
     except yaml.YAMLError as exc:
         raise ValueError(f"invalid YAML configuration: {path}: {exc}") from exc
-    cfg = from_dict(parsed or {})
+    # Apply deployment overrides before validation so a secrets-free YAML file
+    # can supply connection fields such as the Pinecone host through the
+    # documented environment mechanism.
+    cfg = from_dict(parsed or {}, validate=False)
     _apply_environment_overrides(cfg)
     cfg.validate()
     return cfg.resolve_paths(path.parent.resolve())
@@ -443,6 +479,11 @@ def _apply_environment_overrides(cfg: EmbedFlowConfig) -> None:
         "EMBEDFLOW_PGVECTOR_ID_COLUMN": (cfg.index, "id_column"),
         "EMBEDFLOW_PGVECTOR_VECTOR_COLUMN": (cfg.index, "vector_column"),
         "EMBEDFLOW_PGVECTOR_TEXT_COLUMN": (cfg.index, "text_column"),
+        "EMBEDFLOW_PINECONE_HOST": (cfg.index, "host"),
+        "EMBEDFLOW_PINECONE_INDEX_NAME": (cfg.index, "index_name"),
+        "EMBEDFLOW_PINECONE_NAMESPACE": (cfg.index, "namespace"),
+        "EMBEDFLOW_PINECONE_TEXT_METADATA_FIELD": (cfg.index, "text_metadata_field"),
+        "EMBEDFLOW_PINECONE_API_KEY_ENV": (cfg.index, "api_key_env"),
         "EMBEDFLOW_DOCUMENTS_PATH": (cfg.documents, "path"),
         "EMBEDFLOW_CACHE_PATH": (cfg.cache, "path"),
         "EMBEDFLOW_STATE_PATH": (cfg, "state_path"),

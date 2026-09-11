@@ -50,7 +50,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install package and release tooling
-        run: python -m pip install -e ".[dev,faiss,qdrant,pgvector,dashboard]"
+        run: python -m pip install -e ".[dev,faiss,qdrant,pgvector,pinecone,dashboard]"
       - name: Run full release gate
         run: python scripts/release_gate.py
 
@@ -96,7 +96,7 @@ jobs:
           /tmp/embedflow-release-wheel/bin/python -m pip install --upgrade pip
           /tmp/embedflow-release-wheel/bin/python -m pip install dist/*.whl
           cd /tmp
-          /tmp/embedflow-release-wheel/bin/python -c "import embedflow; assert embedflow.__version__ == '0.2.0'; print(embedflow.__version__)"
+          /tmp/embedflow-release-wheel/bin/python -c "import embedflow; assert embedflow.__version__ == '0.3.0'; print(embedflow.__version__)"
           /tmp/embedflow-release-wheel/bin/embedflow --help
           /tmp/embedflow-release-wheel/bin/embedflow registry list
       - name: Store distributions

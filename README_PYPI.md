@@ -5,7 +5,7 @@
 EmbedFlow lets a new embedding model serve over candidates from an existing
 vector index while target document vectors are materialized progressively. It
 supports migration analysis, persistent caching, background work, FAISS,
-Qdrant, pgvector, a CLI, and FastAPI.
+Qdrant, pgvector, Pinecone, a CLI, and FastAPI.
 
 The full project README and architecture diagram are on
 <https://github.com/arnsri33/embedflow>.
@@ -26,6 +26,12 @@ For an existing PostgreSQL/pgvector table:
 
 ```bash
 python -m pip install "embedflow[pgvector]"
+```
+
+For an existing Pinecone dense index:
+
+```bash
+python -m pip install "embedflow[pinecone]"
 ```
 
 Qdrant and model-runtime extras are documented in the
@@ -129,10 +135,12 @@ for definitions and reproduction details.
 | FAISS | Supported |
 | Qdrant | Supported |
 | pgvector | Supported |
+| Pinecone | Supported |
 
 See the [FAISS guide](https://github.com/arnsri33/embedflow/blob/main/docs/integrations/faiss.md),
 [Qdrant guide](https://github.com/arnsri33/embedflow/blob/main/docs/integrations/qdrant.md),
-and [pgvector guide](https://github.com/arnsri33/embedflow/blob/main/docs/integrations/pgvector.md).
+and [pgvector guide](https://github.com/arnsri33/embedflow/blob/main/docs/integrations/pgvector.md),
+and [Pinecone guide](https://github.com/arnsri33/embedflow/blob/main/docs/integrations/pinecone.md).
 
 ## CLI
 
@@ -152,7 +160,7 @@ cover the remaining commands and endpoints.
 
 ## Status
 
-EmbedFlow v0.2.0 is an alpha release for research and early real-world
+EmbedFlow v0.3.0 is an alpha release for research and early real-world
 testing. T2-v1 is an empirical finite-tail diagnostic, partial rankings can
 differ from fully warm target reranking, and ANN fidelity needs a reference
 comparison to audit.

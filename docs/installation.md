@@ -31,6 +31,7 @@ python -m pip install -e .
 | `faiss` | FAISS source-index adapter |
 | `qdrant` | Qdrant client and adapter |
 | `pgvector` | Psycopg 3 binary driver and pgvector adapter |
+| `pinecone` | Official Pinecone Python SDK and adapter |
 | `models` | PyTorch, Transformers, Sentence Transformers, and Hub client |
 | `dashboard` | FastAPI, Uvicorn, and Pydantic |
 | `dev` | Pytest, Ruff, and build tooling |
@@ -58,6 +59,12 @@ by `index.api_key_env`. Keep the key in the environment. See
 Install the optional adapter with `python -m pip install "embedflow[pgvector]"`.
 The adapter connects to an existing table and reads the DSN from the
 environment; see [`integrations/pgvector.md`](integrations/pgvector.md).
+
+## Pinecone
+
+Install the optional adapter with `python -m pip install "embedflow[pinecone]"`.
+Set `PINECONE_API_KEY` in the environment and configure an existing dense
+index host; see [`integrations/pinecone.md`](integrations/pinecone.md).
 
 ## CPU and GPU
 

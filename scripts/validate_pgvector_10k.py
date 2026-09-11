@@ -684,7 +684,7 @@ def test_wheel(repo: Path, dsn: str, config_path: Path, tmp: Path) -> dict[str, 
         assert_true(result.returncode == 0, f"installed wheel command {command} failed: {result.stdout}\n{result.stderr}")
         outputs[" ".join(command)] = result.stdout
     import_result = subprocess.run([str(venv / "bin" / "python"), "-c", "import embedflow, psycopg; print(embedflow.__version__)"], cwd=tmp, env=env, capture_output=True, text=True)
-    assert_true(import_result.returncode == 0 and import_result.stdout.strip() == "0.2.0", f"wheel import failed: {import_result.stdout}\n{import_result.stderr}")
+    assert_true(import_result.returncode == 0 and import_result.stdout.strip() == "0.3.0", f"wheel import failed: {import_result.stdout}\n{import_result.stderr}")
     return {"wheel": str(wheel), "commands": list(outputs), "import": import_result.stdout.strip()}
 
 
@@ -794,7 +794,7 @@ def main() -> int:
             container.cleanup()
         report = {
             "schema": "embedflow.pgvector-validation.v1",
-            "prepared_version": "0.2.0",
+            "prepared_version": "0.3.0",
             "rows": fixture.get("rows"),
             "table": table,
             "results": results,

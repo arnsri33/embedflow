@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.0 — Pinecone backend
+
+- Added a read-only Pinecone backend for existing dense indexes.
+- Added host targeting, index-name resolution, namespace-aware retrieval, and
+  metadata or external-document text resolution.
+- Added Pinecone status/audit integration, optional dependency packaging, and
+  unit/integration smoke fixtures.
+
 ## v0.2.0 — pgvector backend
 
 - Added a read-only pgvector backend for existing PostgreSQL vector tables.

@@ -49,7 +49,9 @@ request. A partial response scores the available target vectors; it can differ
 from the fully warm ranking.
 
 `/status` includes safe backend metadata. For pgvector this names the
-schema/table and vector contract without returning the DSN or credentials;
+schema/table and vector contract; for Pinecone it names the host/index,
+namespace, dimension, metric, and safe vector counts. Neither backend returns
+the DSN, API key, or credentials;
 `/health` remains a compact liveness response for probes and load balancers.
 
 ## Errors
