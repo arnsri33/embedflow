@@ -147,6 +147,17 @@ class IndexConfig:
     index_name: str | None = None
     namespace: str = ""
     text_metadata_field: str | None = None
+    # Milvus settings. ``uri`` is the endpoint accepted by MilvusClient;
+    # ``path`` remains a backwards-compatible endpoint escape hatch.
+    uri: str | None = None
+    token_env: str | None = "EMBEDFLOW_MILVUS_TOKEN"
+    database: str = "default"
+    id_field: str = "id"
+    vector_field: str | None = "embedding"
+    text_field: str | None = "content"
+    partition_names: list[str] = field(default_factory=list)
+    search_params: dict[str, Any] = field(default_factory=dict)
+    auto_load: bool = False
 
 
 @dataclass
@@ -252,15 +263,15 @@ class EmbedFlowConfig:
         if self.source.fingerprint == self.target.fingerprint:
             raise ValueError("source and target embedding contracts must differ for migration")
         backend = self.index.backend.lower() if isinstance(self.index.backend, str) else ""
-        if backend not in {"faiss", "qdrant", "pgvector", "pinecone"}:
-            raise ValueError("index.backend must be faiss, qdrant, pgvector, or pinecone")
+        if backend not in {"faiss", "qdrant", "pgvector", "pinecone", "milvus"}:
+            raise ValueError("index.backend must be faiss, qdrant, pgvector, pinecone, or milvus")
         allowed_metrics = {"cosine", "dot", "inner_product"}
-        if backend == "pgvector":
+        if backend in {"pgvector", "milvus"}:
             allowed_metrics |= {"l2", "euclidean"}
-        if backend == "pinecone":
+        if backend in {"pinecone", "milvus"}:
             allowed_metrics |= {"dotproduct", "l2", "euclidean"}
         if not isinstance(self.index.metric, str) or self.index.metric.lower() not in allowed_metrics:
-            names = "cosine, dot, inner_product" + (", dotproduct, l2, or euclidean" if backend == "pinecone" else ", l2, or euclidean" if backend == "pgvector" else "")
+            names = "cosine, dot, inner_product" + (", dotproduct, l2, or euclidean" if backend in {"pinecone", "milvus"} else ", l2, or euclidean" if backend == "pgvector" else "")
             raise ValueError(f"index.metric must be {names}")
         if backend == "pgvector":
             for label, value in (("index.schema", self.index.schema), ("index.table", self.index.table),
@@ -287,6 +298,66 @@ class EmbedFlowConfig:
                     raise ValueError(f"{label} must be null or a non-empty string without NUL bytes")
             if not isinstance(self.index.namespace, str) or "\x00" in self.index.namespace:
                 raise ValueError("index.namespace must be a string without NUL bytes")
+        if backend == "milvus":
+            # ``uri`` is the documented field.  ``path`` remains a
+            # backwards-compatible endpoint escape hatch for programmatic
+            # callers, so permit it when it contains a URI rather than
+            # rejecting a valid legacy configuration at the first check.
+            uri_configured = isinstance(self.index.uri, str) and bool(self.index.uri.strip())
+            path_uri = isinstance(self.index.path, str) and "://" in self.index.path
+            for label, value in (("index.collection", self.index.collection),
+                                 ("index.database", self.index.database), ("index.id_field", self.index.id_field)):
+                if not isinstance(value, str) or not value.strip() or "\x00" in value:
+                    raise ValueError(f"{label} must be a non-empty string without NUL bytes")
+            for label, value in (("index.vector_field", self.index.vector_field), ("index.text_field", self.index.text_field),
+                                 ("index.token_env", self.index.token_env)):
+                if value is not None and (not isinstance(value, str) or not value.strip() or "\x00" in value):
+                    raise ValueError(f"{label} must be null or a non-empty string without NUL bytes")
+            if not uri_configured and not path_uri:
+                raise ValueError("index.backend=milvus requires index.uri (for example http://localhost:19530)")
+            if not isinstance(self.index.partition_names, list) or any(not isinstance(item, str) or not item.strip() for item in self.index.partition_names):
+                raise ValueError("index.partition_names must be a list of non-empty strings")
+            if len(set(self.index.partition_names)) != len(self.index.partition_names):
+                raise ValueError("index.partition_names must not contain duplicates")
+            if not isinstance(self.index.search_params, Mapping):
+                raise ValueError("index.search_params must be a mapping")
+            self.index.search_params = dict(self.index.search_params)
+            # Keep the public configuration surface deliberately small.  The
+            # adapter accepts the common HNSW/IVF/range controls in either a
+            # flat mapping or Milvus' native {metric_type, params} shape;
+            # reject typos before any client is initialized.
+            search_keys = {"ef", "nprobe", "radius", "range_filter"}
+            if "params" in self.index.search_params or "metric_type" in self.index.search_params:
+                unknown = set(self.index.search_params) - {"metric_type", "params"}
+                if unknown:
+                    raise ValueError(f"index.search_params has unsupported keys: {sorted(unknown)!r}")
+                nested = self.index.search_params.get("params", {})
+                if not isinstance(nested, Mapping):
+                    raise ValueError("index.search_params.params must be a mapping")
+                unknown_nested = set(nested) - search_keys
+                if unknown_nested:
+                    raise ValueError(f"index.search_params.params has unsupported keys: {sorted(unknown_nested)!r}")
+            else:
+                unknown = set(self.index.search_params) - search_keys
+                if unknown:
+                    raise ValueError(f"index.search_params has unsupported keys: {sorted(unknown)!r}")
+            params_to_check = self.index.search_params.get("params", self.index.search_params)
+            if isinstance(params_to_check, Mapping):
+                for name in ("ef", "nprobe"):
+                    if name in params_to_check:
+                        _integer(params_to_check[name], f"index.search_params.{name}", minimum=1)
+                for name in ("radius", "range_filter"):
+                    if name in params_to_check:
+                        raw = params_to_check[name]
+                        if isinstance(raw, bool):
+                            raise ValueError(f"index.search_params.{name} must be a finite number")
+                        try:
+                            if not math.isfinite(float(raw)):
+                                raise ValueError
+                        except (TypeError, ValueError, OverflowError) as exc:
+                            raise ValueError(f"index.search_params.{name} must be a finite number") from exc
+            if not isinstance(self.index.auto_load, bool):
+                raise ValueError("index.auto_load must be a boolean")
         candidate_depth = self.migration.candidate_depth
         if isinstance(candidate_depth, str) and candidate_depth.strip().lower() == "auto":
             candidate_depth = "auto"
@@ -303,6 +374,11 @@ class EmbedFlowConfig:
                 raise ValueError("Pinecone migration.candidate_depth must be <= 10000")
             if self.migration.kmax_probe > 10_000:
                 raise ValueError("Pinecone migration.kmax_probe must be <= 10000")
+        if backend == "milvus":
+            if candidate_depth != "auto" and int(candidate_depth) > 16_384:
+                raise ValueError("Milvus migration.candidate_depth must be <= 16384")
+            if self.migration.kmax_probe > 16_384:
+                raise ValueError("Milvus migration.kmax_probe must be <= 16384")
         self.migration.max_sync_misses = _integer(self.migration.max_sync_misses, "migration.max_sync_misses", minimum=0)
         self.migration.background_batch_size = _integer(self.migration.background_batch_size, "migration.background_batch_size", minimum=1)
         self.migration.max_retries = _integer(self.migration.max_retries, "migration.max_retries", minimum=1)
@@ -345,8 +421,18 @@ def from_dict(raw: dict[str, Any], *, validate: bool = True) -> EmbedFlowConfig:
     if isinstance(migration_raw.get("candidate_depth"), str) and migration_raw["candidate_depth"].strip().lower() == "auto":
         migration_raw["candidate_depth"] = "auto"
     index_raw = dict(raw.get("index", {}))
-    if str(index_raw.get("backend", "faiss")).lower() == "pinecone" and "api_key_env" not in index_raw:
+    backend_name = str(index_raw.get("backend", "faiss")).lower()
+    if backend_name == "pinecone" and "api_key_env" not in index_raw:
         index_raw["api_key_env"] = "PINECONE_API_KEY"
+    if backend_name == "milvus":
+        if "token_env" not in index_raw:
+            index_raw["token_env"] = "EMBEDFLOW_MILVUS_TOKEN"
+        # Unlike the legacy FAISS/pgvector defaults, Milvus collections may
+        # contain several dense fields.  Preserve omission so the adapter can
+        # auto-select exactly one compatible field or reject an ambiguity;
+        # generated examples/CLI configs still write ``embedding`` explicitly.
+        if "vector_field" not in index_raw:
+            index_raw["vector_field"] = None
     cfg = EmbedFlowConfig(
         source=source,
         target=target,
@@ -484,6 +570,14 @@ def _apply_environment_overrides(cfg: EmbedFlowConfig) -> None:
         "EMBEDFLOW_PINECONE_NAMESPACE": (cfg.index, "namespace"),
         "EMBEDFLOW_PINECONE_TEXT_METADATA_FIELD": (cfg.index, "text_metadata_field"),
         "EMBEDFLOW_PINECONE_API_KEY_ENV": (cfg.index, "api_key_env"),
+        "EMBEDFLOW_MILVUS_URI": (cfg.index, "uri"),
+        "EMBEDFLOW_MILVUS_TOKEN_ENV": (cfg.index, "token_env"),
+        "EMBEDFLOW_MILVUS_DATABASE": (cfg.index, "database"),
+        "EMBEDFLOW_MILVUS_COLLECTION": (cfg.index, "collection"),
+        "EMBEDFLOW_MILVUS_ID_FIELD": (cfg.index, "id_field"),
+        "EMBEDFLOW_MILVUS_VECTOR_FIELD": (cfg.index, "vector_field"),
+        "EMBEDFLOW_MILVUS_TEXT_FIELD": (cfg.index, "text_field"),
+        "EMBEDFLOW_MILVUS_PARTITIONS": (cfg.index, "partition_names"),
         "EMBEDFLOW_DOCUMENTS_PATH": (cfg.documents, "path"),
         "EMBEDFLOW_CACHE_PATH": (cfg.cache, "path"),
         "EMBEDFLOW_STATE_PATH": (cfg, "state_path"),
@@ -522,6 +616,15 @@ def _apply_environment_overrides(cfg: EmbedFlowConfig) -> None:
             except (TypeError, ValueError, OverflowError) as exc:
                 raise ValueError(f"{variable} must be an integer") from exc
             setattr(target, field_name, parsed)
+    partitions = os.environ.get("EMBEDFLOW_MILVUS_PARTITION_NAMES") or os.environ.get("EMBEDFLOW_MILVUS_PARTITIONS")
+    if partitions is not None and partitions.strip():
+        cfg.index.partition_names = [item.strip() for item in partitions.split(",") if item.strip()]
+    auto_load = os.environ.get("EMBEDFLOW_MILVUS_AUTO_LOAD")
+    if auto_load is not None and auto_load.strip():
+        value = auto_load.strip().lower()
+        if value not in {"0", "1", "true", "false", "yes", "no"}:
+            raise ValueError("EMBEDFLOW_MILVUS_AUTO_LOAD must be true or false")
+        cfg.index.auto_load = value in {"1", "true", "yes"}
 
 
 def save_config(cfg: EmbedFlowConfig, path: str | Path) -> None:

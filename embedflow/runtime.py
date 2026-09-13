@@ -8,6 +8,8 @@ from .cache import SQLiteVectorCache
 from .config import EmbedFlowConfig, load_config
 from .indexes import (
     FaissIndex,
+    MilvusDocumentStore,
+    MilvusIndex,
     NumpyIndex,
     PgVectorDocumentStore,
     PgVectorIndex,
@@ -20,7 +22,7 @@ from .models import load_embedding_model
 from .serving.engine import MigrationEngine
 
 
-def load_documents(cfg: EmbedFlowConfig, index: Any | None = None) -> DocumentStore | PgVectorDocumentStore | PineconeDocumentStore:
+def load_documents(cfg: EmbedFlowConfig, index: Any | None = None) -> DocumentStore | PgVectorDocumentStore | PineconeDocumentStore | MilvusDocumentStore:
     """Load the configured document resolver.
 
     A pgvector table commonly stores both the legacy vector and document text.
@@ -45,10 +47,17 @@ def load_documents(cfg: EmbedFlowConfig, index: Any | None = None) -> DocumentSt
             text_field=cfg.index.text_metadata_field,
             owns_index=index is None,
         )
+    if backend == "milvus" and not Path(cfg.documents.path).expanduser().exists():
+        milvus_index = index if isinstance(index, MilvusIndex) else MilvusIndex.from_config(cfg)
+        return MilvusDocumentStore(
+            milvus_index,
+            text_field=cfg.index.text_field,
+            owns_index=index is None,
+        )
     return DocumentStore(cfg.documents.path, cfg.documents.id_field, cfg.documents.text_field)
 
 
-def load_index(cfg: EmbedFlowConfig, documents: DocumentStore | PgVectorDocumentStore | PineconeDocumentStore):
+def load_index(cfg: EmbedFlowConfig, documents: DocumentStore | PgVectorDocumentStore | PineconeDocumentStore | MilvusDocumentStore):
     if cfg.index.backend.lower() == "pgvector":
         if isinstance(documents, PgVectorDocumentStore):
             return documents.index
@@ -57,6 +66,10 @@ def load_index(cfg: EmbedFlowConfig, documents: DocumentStore | PgVectorDocument
         if isinstance(documents, PineconeDocumentStore):
             return documents.index
         return PineconeIndex.from_config(cfg, documents=documents.documents)
+    if cfg.index.backend.lower() == "milvus":
+        if isinstance(documents, MilvusDocumentStore):
+            return documents.index
+        return MilvusIndex.from_config(cfg, documents=documents.documents)
     metadata = documents.documents
     if cfg.index.backend.lower() == "faiss":
         try:
@@ -78,7 +91,7 @@ def load_index(cfg: EmbedFlowConfig, documents: DocumentStore | PgVectorDocument
 
 
 def open_engine(config_path: str | Path, device: str | None = None, demo: bool = False,
-                start_worker: bool = True, documents: DocumentStore | PgVectorDocumentStore | None = None,
+                start_worker: bool = True, documents: DocumentStore | PgVectorDocumentStore | PineconeDocumentStore | MilvusDocumentStore | None = None,
                 allow_empty_index: bool = False) -> MigrationEngine:
     """Load models, a source index, cache, and the shared migration engine.
 
@@ -104,7 +117,7 @@ def open_engine(config_path: str | Path, device: str | None = None, demo: bool =
             raise ValueError(f"source model dimension {source_model.dimension} != configured {cfg.source.dimension}")
         source_index = load_index(cfg, documents)
         if source_index.size() <= 0 and not allow_empty_index:
-            raise ValueError("legacy index is empty or its configured Qdrant collection is unavailable")
+            raise ValueError("legacy index is empty or its configured remote collection is unavailable")
         if int(source_index.dimension) != int(source_model.dimension):
             raise ValueError(f"source model dimension {source_model.dimension} != existing index dimension {source_index.dimension}")
         index_ids = getattr(source_index, "ids", None)

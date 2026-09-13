@@ -27,7 +27,14 @@ from ..config import (
     hydrate_research_contract,
     save_config,
 )
-from ..indexes import PgVectorDocumentStore, PgVectorIndex, PineconeDocumentStore, PineconeIndex
+from ..indexes import (
+    MilvusDocumentStore,
+    MilvusIndex,
+    PgVectorDocumentStore,
+    PgVectorIndex,
+    PineconeDocumentStore,
+    PineconeIndex,
+)
 from ..indexes.base import VectorIndex
 from ..migration.compatibility import run_probe, save_probe
 from ..migration.state import DocumentStore
@@ -52,6 +59,8 @@ def _infer_backend(index_value: str, explicit: str | None = None) -> str:
         return "pgvector"
     if ".pinecone.io" in lowered:
         return "pinecone"
+    if lowered.startswith(("milvus://", "milvus+grpc://", "http://localhost:19530", "http://127.0.0.1:19530", "https://localhost:19530", "https://127.0.0.1:19530")):
+        return "milvus"
     if "://" in lowered:
         return "qdrant"
     return "faiss"
@@ -189,7 +198,7 @@ def migrate(
     index: str | Path | VectorIndex,
     old_model: str | Path | EmbeddingModel,
     new_model: str | Path | EmbeddingModel,
-    documents: str | Path | DocumentStore | PgVectorDocumentStore | PineconeDocumentStore | None = None,
+    documents: str | Path | DocumentStore | PgVectorDocumentStore | PineconeDocumentStore | MilvusDocumentStore | None = None,
     backend: str | None = None,
     index_url: str | None = None,
     collection: str = "embedflow",
@@ -207,6 +216,15 @@ def migrate(
     index_name: str | None = None,
     namespace: str = "",
     text_metadata_field: str | None = None,
+    uri: str | None = None,
+    token_env: str | None = "EMBEDFLOW_MILVUS_TOKEN",
+    database: str = "default",
+    id_field: str = "id",
+    vector_field: str | None = "embedding",
+    text_field: str | None = "content",
+    partition_names: list[str] | None = None,
+    search_params: dict[str, Any] | None = None,
+    auto_load: bool = False,
     metric: str = "cosine",
     model_root: str | Path | None = None,
     device: str | None = None,
@@ -231,7 +249,7 @@ def migrate(
     supplied, the existing frozen T2-v1 implementation is run before the
     session is returned.
     """
-    if isinstance(documents, (DocumentStore, PgVectorDocumentStore, PineconeDocumentStore)):
+    if isinstance(documents, (DocumentStore, PgVectorDocumentStore, PineconeDocumentStore, MilvusDocumentStore)):
         document_store = documents
     elif documents is None:
         document_store = None
@@ -262,8 +280,8 @@ def migrate(
         else:
             index_path = str(index_url or index)
             index_backend = _infer_backend(index_path, backend)
-            if index_backend not in {"faiss", "qdrant", "pgvector", "pinecone"}:
-                raise ValueError("backend must be faiss, qdrant, pgvector, or pinecone")
+            if index_backend not in {"faiss", "qdrant", "pgvector", "pinecone", "milvus"}:
+                raise ValueError("backend must be faiss, qdrant, pgvector, pinecone, or milvus")
 
         explicit_url = index_url
         if index_backend == "pgvector" and explicit_url is None and "://" in index_path:
@@ -290,8 +308,15 @@ def migrate(
             explicit_url = None
             if not api_key_env or api_key_env == "QDRANT_API_KEY":
                 api_key_env = "PINECONE_API_KEY"
-        if document_store is None and index_backend not in {"pgvector", "pinecone"}:
-            raise ValueError("documents is required for FAISS and Qdrant; pgvector/Pinecone can resolve text from their configured text fields")
+        milvus_uri = uri
+        if index_backend == "milvus":
+            if milvus_uri is None and index_path and "://" in index_path:
+                milvus_uri = index_path
+            index_path = "./legacy.index"
+            explicit_url = None
+            token_env = token_env or "EMBEDFLOW_MILVUS_TOKEN"
+        if document_store is None and index_backend not in {"pgvector", "pinecone", "milvus"}:
+            raise ValueError("documents is required for FAISS and Qdrant; pgvector/Pinecone/Milvus can resolve text from their configured text fields")
         cfg = EmbedFlowConfig(
             source=source_cfg,
             target=target_cfg,
@@ -301,7 +326,11 @@ def migrate(
                               id_column=id_column, vector_column=vector_column, text_column=text_column,
                               hnsw_ef_search=hnsw_ef_search, ivfflat_probes=ivfflat_probes,
                               host=pinecone_host, index_name=pinecone_index_name,
-                              namespace=namespace, text_metadata_field=text_metadata_field),
+                              namespace=namespace, text_metadata_field=text_metadata_field,
+                              uri=milvus_uri, token_env=token_env, database=database,
+                              id_field=id_field, vector_field=vector_field, text_field=text_field,
+                              partition_names=list(partition_names or []), search_params=dict(search_params or {}),
+                              auto_load=auto_load),
             documents=DocumentsConfig(path=str(document_store.path) if document_store is not None else "./documents.jsonl"),
             migration=MigrationConfig(candidate_depth=int(candidate_depth), kmax_probe=max(int(kmax_probe), int(candidate_depth)),
                                       max_sync_misses=int(max_sync_misses), background_batch_size=int(background_batch_size)),
@@ -318,6 +347,9 @@ def migrate(
                 if index_backend == "pinecone":
                     source_index = PineconeIndex.from_config(cfg)
                     document_store = PineconeDocumentStore(source_index, text_field=cfg.index.text_metadata_field, owns_index=False)
+                elif index_backend == "milvus":
+                    source_index = MilvusIndex.from_config(cfg)
+                    document_store = MilvusDocumentStore(source_index, text_field=cfg.index.text_field, owns_index=False)
                 else:
                     source_index = PgVectorIndex.from_config(cfg)
                     document_store = PgVectorDocumentStore(source_index, text_field=cfg.index.text_column or "content", owns_index=False)
@@ -328,8 +360,10 @@ def migrate(
                 document_store = PgVectorDocumentStore(source_index, text_field=cfg.index.text_column or "content", owns_index=False)
             elif isinstance(source_index, PineconeIndex):
                 document_store = PineconeDocumentStore(source_index, text_field=cfg.index.text_metadata_field, owns_index=False)
+            elif isinstance(source_index, MilvusIndex):
+                document_store = MilvusDocumentStore(source_index, text_field=cfg.index.text_field, owns_index=False)
             else:
-                raise ValueError("documents is required unless the supplied index is a pgvector or Pinecone backend")
+                raise ValueError("documents is required unless the supplied index is a pgvector, Pinecone, or Milvus backend")
         if int(source_index.dimension) != int(source_model.dimension):
             raise ValueError(f"source model dimension {source_model.dimension} != existing index dimension {source_index.dimension}")
         stored_fingerprint = source_index.metadata().get("model_fingerprint")

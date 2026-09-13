@@ -7,7 +7,7 @@
 EmbedFlow lets a new embedding model serve over candidates from an existing
 vector index while target document vectors are materialized progressively. It
 supports migration analysis, persistent caching, background work, and serving
-through FAISS, Qdrant, pgvector, Pinecone, a CLI, and FastAPI.
+through FAISS, Qdrant, pgvector, Pinecone, Milvus, a CLI, and FastAPI.
 
 [Quickstart](#try-it) · [Documentation](#documentation) · [Research](#research)
 
@@ -56,6 +56,12 @@ For an existing Pinecone dense index:
 
 ```bash
 python -m pip install "embedflow[pinecone]"
+```
+
+For an existing Milvus collection:
+
+```bash
+python -m pip install "embedflow[milvus]"
 ```
 
 Qdrant and model-runtime extras are documented in
@@ -197,6 +203,7 @@ is measured separately and is `UNKNOWN` until an exact reference is supplied.
 | Qdrant | Supported |
 | pgvector | Supported |
 | Pinecone | Supported |
+| Milvus | Supported |
 
 Backend-specific setup and examples:
 
@@ -204,6 +211,7 @@ Backend-specific setup and examples:
 - [Qdrant](https://github.com/arnsri33/embedflow/blob/main/docs/integrations/qdrant.md)
 - [pgvector](https://github.com/arnsri33/embedflow/blob/main/docs/integrations/pgvector.md)
 - [Pinecone](https://github.com/arnsri33/embedflow/blob/main/docs/integrations/pinecone.md)
+- [Milvus](https://github.com/arnsri33/embedflow/blob/main/docs/integrations/milvus.md)
 - [Adding a backend](https://github.com/arnsri33/embedflow/blob/main/CONTRIBUTING.md)
 
 ## CLI
@@ -238,7 +246,7 @@ OpenAPI documentation; see
 
 ## Status
 
-EmbedFlow v0.3.0 is an alpha release for research and early real-world
+EmbedFlow v0.4.0 is an alpha release for research and early real-world
 testing.
 
 - T2-v1 reports an empirical finite-tail diagnostic.

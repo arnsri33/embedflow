@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.4.0 — Milvus backend
+
+- Added a read-only Milvus backend for existing dense `FLOAT_VECTOR`
+  collections.
+- Added collection/database/partition selection, HNSW/IVF search parameters,
+  metric and schema auditing, and Milvus-backed document text resolution.
+- Added deterministic standalone Docker fixtures, examples, and optional
+  `pymilvus` packaging.
+
 ## v0.3.0 — Pinecone backend
 
 - Added a read-only Pinecone backend for existing dense indexes.

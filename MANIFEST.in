@@ -1,6 +1,6 @@
 include README.md README_PYPI.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md CITATION.cff requirements.txt requirements-dev.txt
 recursive-include docs *
-recursive-include examples *.md *.yaml *.json *.jsonl *.py *.sql *.sh
+recursive-include examples *.md *.yaml *.yaml.example *.json *.jsonl *.py *.sql *.sh
 recursive-include scripts *.sh *.py
 recursive-include frozen *.md *.sha256
 prune .github

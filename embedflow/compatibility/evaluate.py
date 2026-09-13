@@ -86,6 +86,9 @@ def _load_index(path: str | Path, backend: str, metric: str, documents: dict[str
                 raise exc from fallback_exc
     if backend == "qdrant":
         return QdrantIndex.connect(str(path), "embedflow", int(dimension or 0), documents=documents, metric=metric)
+    if backend == "milvus":
+        from ..indexes import MilvusIndex
+        return MilvusIndex.connect(str(path), collection="documents", dimension=dimension, documents=documents, metric=metric)
     raise ValueError(f"unsupported index backend: {backend}")
 
 

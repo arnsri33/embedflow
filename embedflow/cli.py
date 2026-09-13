@@ -61,6 +61,9 @@ def _index_display(cfg: EmbedFlowConfig) -> str:
     if cfg.index.backend.lower() == "pinecone":
         endpoint = cfg.index.host or cfg.index.index_name or "configured index"
         return f"{endpoint} (namespace={cfg.index.namespace or '<default>'})"
+    if cfg.index.backend.lower() == "milvus":
+        endpoint = cfg.index.uri or cfg.index.path or "configured endpoint"
+        return f"{endpoint} / {cfg.index.database}.{cfg.index.collection}"
     return str(cfg.index.path)
 
 
@@ -146,10 +149,10 @@ def _direct_analysis_config(args: argparse.Namespace) -> tuple[Path, EmbedFlowCo
     backend = args.backend
     if backend is None:
         lowered_index = index_value.strip().lower()
-        backend = "pgvector" if lowered_index.startswith(("postgresql://", "postgres://")) else ("pinecone" if ".pinecone.io" in lowered_index else ("qdrant" if "://" in lowered_index else "faiss"))
-    if not args.documents and backend != "pinecone":
-        raise ValueError("direct analyze requires --documents unless --backend pinecone uses metadata-backed text")
-    remote_url = index_value if backend in {"qdrant", "pgvector"} and "://" in index_value else None
+        backend = "pgvector" if lowered_index.startswith(("postgresql://", "postgres://")) else ("pinecone" if ".pinecone.io" in lowered_index else ("milvus" if lowered_index.startswith(("milvus://", "milvus+grpc://", "http://localhost:19530", "http://127.0.0.1:19530", "https://localhost:19530", "https://127.0.0.1:19530")) else ("qdrant" if "://" in lowered_index else "faiss")))
+    if not args.documents and backend not in {"pinecone", "milvus"}:
+        raise ValueError("direct analyze requires --documents unless --backend pinecone/milvus uses backend text")
+    remote_url = index_value if backend in {"qdrant", "pgvector", "milvus"} and "://" in index_value else None
     if backend == "pgvector" and remote_url:
         # A one-shot DSN is convenient, but never write credentials into the
         # generated reusable YAML. Keep it in this process under the declared
@@ -160,6 +163,8 @@ def _direct_analysis_config(args: argparse.Namespace) -> tuple[Path, EmbedFlowCo
     elif backend == "pinecone":
         index_path = "./legacy.index"
         remote_url = None
+    elif backend == "milvus":
+        index_path = "./legacy.index"
     else:
         index_path = index_value if remote_url else str(Path(index_value).expanduser().resolve())
     pinecone_host = getattr(args, "host", None)
@@ -179,7 +184,16 @@ def _direct_analysis_config(args: argparse.Namespace) -> tuple[Path, EmbedFlowCo
                           text_column=args.text_column, hnsw_ef_search=args.hnsw_ef_search,
                           ivfflat_probes=args.ivfflat_probes, host=pinecone_host,
                           index_name=getattr(args, "index_name", None), namespace=getattr(args, "namespace", ""),
-                          text_metadata_field=getattr(args, "text_metadata_field", None)),
+                          text_metadata_field=getattr(args, "text_metadata_field", None),
+                          uri=getattr(args, "milvus_uri", None) or remote_url,
+                          token_env=getattr(args, "token_env", "EMBEDFLOW_MILVUS_TOKEN"),
+                          database=getattr(args, "database", "default"),
+                          id_field=getattr(args, "id_field", "id"),
+                          vector_field=getattr(args, "vector_field", "embedding"),
+                          text_field=getattr(args, "milvus_text_field", "content"),
+                          partition_names=list(getattr(args, "partition_names", []) or []),
+                          search_params=dict(getattr(args, "search_params", {}) or {}),
+                          auto_load=bool(getattr(args, "auto_load", False))),
         documents=DocumentsConfig(path=str(Path(args.documents).expanduser().resolve()) if args.documents else "./documents.jsonl"),
         migration=MigrationConfig(candidate_depth="auto", kmax_probe=int(args.kmax or 500), probe_queries=int(args.limit or 100)),
         cache=CacheConfig(path=str(output_dir / "embedflow_cache")),
@@ -355,12 +369,20 @@ def _save_default_config(path: Path, args: argparse.Namespace) -> None:
     index_value = args.index or "./legacy.index"
     cfg = EmbedFlowConfig(source=source, target=target,
                           index=IndexConfig(backend=backend,
-                                            path="./legacy.index" if backend == "pinecone" else index_value,
+                                            path="./legacy.index" if backend in {"pinecone", "milvus"} else index_value,
                                             host=index_value if backend == "pinecone" and args.index else None,
-                                            api_key_env="PINECONE_API_KEY" if backend == "pinecone" else "QDRANT_API_KEY",
+                                            api_key_env="PINECONE_API_KEY" if backend == "pinecone" else None if backend == "milvus" else "QDRANT_API_KEY",
                                             index_name=getattr(args, "index_name", None),
                                             namespace=getattr(args, "namespace", ""),
-                                            text_metadata_field=getattr(args, "text_metadata_field", None)),
+                                            text_metadata_field=getattr(args, "text_metadata_field", None),
+                                            uri=(getattr(args, "uri", None) or (index_value if "://" in str(index_value) else None)) if backend == "milvus" else None,
+                                            token_env=getattr(args, "token_env", "EMBEDFLOW_MILVUS_TOKEN"),
+                                            database=getattr(args, "database", "default"),
+                                            id_field=getattr(args, "id_field", "id"),
+                                            vector_field=getattr(args, "vector_field", "embedding"),
+                                            text_field=getattr(args, "milvus_text_field", "content"),
+                                            partition_names=list(getattr(args, "partition_names", []) or []),
+                                            auto_load=bool(getattr(args, "auto_load", False))),
                           documents=DocumentsConfig(path=args.documents or "./documents.jsonl"),
                           cache=CacheConfig(path=args.cache or "./embedflow_cache"))
     save_config(cfg, path); print(f"wrote {path}")
@@ -372,8 +394,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         if not args.source_model and not args.target_model and not args.documents and not args.index:
             if sys.stdin.isatty():
                 print("EmbedFlow initialization")
-                backend_choice = input("Existing index backend [1] FAISS / [2] Qdrant / [3] pgvector / [4] Pinecone (1): ").strip()
-                args.backend = {"2": "qdrant", "3": "pgvector", "4": "pinecone"}.get(backend_choice, "faiss")
+                backend_choice = input("Existing index backend [1] FAISS / [2] Qdrant / [3] pgvector / [4] Pinecone / [5] Milvus (1): ").strip()
+                args.backend = {"2": "qdrant", "3": "pgvector", "4": "pinecone", "5": "milvus"}.get(backend_choice, "faiss")
                 args.source_model = input("Source model: ").strip() or "embedflow/demo-source"
                 args.target_model = input("Target model: ").strip() or "embedflow/demo-target"
                 args.documents = input("Corpus JSONL path (./documents.jsonl): ").strip() or "./documents.jsonl"
@@ -404,9 +426,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     finally: engine.close()
     return 0
 
-
 def cmd_migrate(args: argparse.Namespace) -> int:
-    """One-command setup for an existing FAISS or Qdrant index."""
+    """One-command setup for an existing vector index."""
     from .migration.facade import migrate
 
     session = None
@@ -433,6 +454,14 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             index_name=getattr(args, "index_name", None),
             namespace=getattr(args, "namespace", ""),
             text_metadata_field=getattr(args, "text_metadata_field", None),
+            uri=getattr(args, "milvus_uri", None),
+            token_env=getattr(args, "token_env", "EMBEDFLOW_MILVUS_TOKEN"),
+            database=getattr(args, "database", "default"),
+            id_field=getattr(args, "id_field", "id"),
+            vector_field=getattr(args, "vector_field", "embedding"),
+            text_field=getattr(args, "milvus_text_field", "content"),
+            partition_names=list(getattr(args, "partition_names", []) or []),
+            auto_load=bool(getattr(args, "auto_load", False)),
             metric=args.metric,
             model_root=args.model_root,
             device=_normalize_device(args.device),
@@ -646,7 +675,7 @@ def _load_evaluation_index(path: str, backend: str, metric: str, documents: dict
                            ivfflat_probes: int | None = None, host: str | None = None,
                            index_name: str | None = None, namespace: str = "",
                            text_metadata_field: str | None = None):
-    from .indexes import FaissIndex, NumpyIndex, PgVectorIndex, PineconeIndex, QdrantIndex
+    from .indexes import FaissIndex, MilvusIndex, NumpyIndex, PgVectorIndex, PineconeIndex, QdrantIndex
     if backend == "pgvector":
         return PgVectorIndex.connect(url or None, dsn_env=dsn_env, schema=schema, table=table,
                                      id_column=id_column, vector_column=vector_column, text_column=text_column,
@@ -657,6 +686,11 @@ def _load_evaluation_index(path: str, backend: str, metric: str, documents: dict
                                      index_name=index_name, api_key_env=api_key_env,
                                      namespace=namespace, dimension=dimension, metric=metric,
                                      text_metadata_field=text_metadata_field, documents=documents)
+    if backend == "milvus":
+        return MilvusIndex.connect(uri=host or (url if url and "://" in url else path),
+                                   token_env=api_key_env if api_key_env != "QDRANT_API_KEY" else "EMBEDFLOW_MILVUS_TOKEN",
+                                   database="default", collection=collection, id_field="id", vector_field="embedding",
+                                   text_field="content", dimension=dimension, metric=metric, documents=documents)
     if backend == "qdrant":
         return QdrantIndex.connect(url or path, collection, dimension, documents=documents, metric=metric,
                                    vector_name=vector_name, api_key_env=api_key_env)
@@ -676,7 +710,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     checks.append({"name": "python", "ok": version >= (3, 10), "detail": platform.python_version()})
     for module, label in (("numpy", "NumPy"), ("yaml", "PyYAML"), ("faiss", "FAISS"), ("torch", "PyTorch"),
                           ("fastapi", "FastAPI"), ("qdrant_client", "qdrant-client"), ("psycopg", "psycopg"),
-                          ("pinecone", "pinecone")):
+                          ("pinecone", "pinecone"), ("pymilvus", "pymilvus")):
         available = importlib.util.find_spec(module) is not None
         checks.append({"name": label.lower().replace("-", "_"), "ok": available, "detail": "installed" if available else "not installed (optional where noted)"})
     checks.append({"name": "cuda", "ok": True, "detail": _cuda_detail()})
@@ -688,10 +722,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             backend_name = config.index.backend.lower()
             pgvector_backend = backend_name == "pgvector"
             pinecone_backend = backend_name == "pinecone"
-            documents_available = Path(config.documents.path).exists() or pgvector_backend or pinecone_backend
+            milvus_backend = backend_name == "milvus"
+            documents_available = Path(config.documents.path).exists() or pgvector_backend or pinecone_backend or milvus_backend
             checks.append({"name": "documents", "ok": documents_available,
                            "detail": ("resolved from pgvector table" if pgvector_backend and not Path(config.documents.path).exists() else
-                                      "resolved from Pinecone metadata" if pinecone_backend and not Path(config.documents.path).exists() else config.documents.path)})
+                                      "resolved from Pinecone metadata" if pinecone_backend and not Path(config.documents.path).exists() else
+                                      "resolved from Milvus collection" if milvus_backend and not Path(config.documents.path).exists() else config.documents.path)})
             qdrant_endpoint = config.index.url or config.index.path
             if backend_name == "faiss":
                 index_exists = Path(config.index.path).exists()
@@ -700,15 +736,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             elif pinecone_backend:
                 index_exists = bool(config.index.host or config.index.index_name or config.index.url or
                                     ".pinecone.io" in str(config.index.path))
+            elif milvus_backend:
+                index_exists = bool(config.index.uri or (isinstance(config.index.path, str) and "://" in config.index.path))
             else:
                 index_exists = bool(config.index.url or "://" in str(qdrant_endpoint) or Path(config.index.path).exists())
             checks.append({"name": "index", "ok": index_exists,
-                           "detail": "configured pgvector table" if pgvector_backend else (config.index.host or config.index.index_name or config.index.path if pinecone_backend else config.index.path)})
+                           "detail": "configured pgvector table" if pgvector_backend else (config.index.host or config.index.index_name or config.index.path if pinecone_backend else config.index.uri or config.index.path if milvus_backend else config.index.path)})
             normalization_ok = not (config.index.metric.lower() == "cosine" and
                                     (config.source.normalization.lower() != "l2" or config.target.normalization.lower() != "l2"))
             checks.append({"name": "normalization", "ok": normalization_ok,
                            "detail": f"metric={config.index.metric}; source={config.source.normalization}; target={config.target.normalization}"})
-            if Path(config.documents.path).exists() and not pgvector_backend:
+            if Path(config.documents.path).exists() and not (pgvector_backend or pinecone_backend or milvus_backend):
                 docs = DocumentStore(config.documents.path, config.documents.id_field, config.documents.text_field)
                 checks.append({"name": "document_rows", "ok": docs.size() > 0, "detail": f"{docs.size():,} rows"})
             if config.index.backend.lower() == "faiss" and Path(config.index.path).exists():
@@ -755,6 +793,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     pine_index.close()
                 except Exception as exc:
                     checks.append({"name": "pinecone_integrity", "ok": False, "detail": str(exc)})
+            if milvus_backend and index_exists:
+                try:
+                    from .indexes import MilvusIndex
+                    milvus_index = MilvusIndex.from_config(config)
+                    audit = milvus_index.audit(source_dimension=config.source.dimension)
+                    checks.append({"name": "milvus_connection", "ok": bool(audit.get("ok")),
+                                   "detail": f"{config.index.database}.{config.index.collection}" if audit.get("ok") else str(audit.get("checks", {}))})
+                    milvus_index.close()
+                except Exception as exc:
+                    checks.append({"name": "milvus_integrity", "ok": False, "detail": str(exc)})
             cache_path = Path(config.cache.path)
             if cache_path.exists():
                 try:
@@ -771,7 +819,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             checks.append({"name": "target_fingerprint", "ok": True, "detail": config.target.fingerprint[:16]})
         except Exception as exc:
             checks.append({"name": "config", "ok": False, "detail": str(exc)})
-    optional_checks = {"faiss", "qdrant_client", "fastapi", "torch", "pytorch", "psycopg", "pinecone"}
+    optional_checks = {"faiss", "qdrant_client", "fastapi", "torch", "pytorch", "psycopg", "pinecone", "pymilvus"}
     failed = [check for check in checks if not check["ok"] and check["name"] not in optional_checks]
     if args.json:
         _json({"checks": checks, "status": "FAIL" if failed else "PASS"})
@@ -992,6 +1040,9 @@ def cmd_audit_index(args: argparse.Namespace) -> int:
         if cfg.index.backend.lower() == "pinecone":
             result["pinecone_audit"] = engine.source_index.audit(source_dimension=engine.source_model.dimension)
             result["checks"]["pinecone"] = bool(result["pinecone_audit"].get("ok"))
+        if cfg.index.backend.lower() == "milvus":
+            result["milvus_audit"] = engine.source_index.audit(source_dimension=engine.source_model.dimension)
+            result["checks"]["milvus"] = bool(result["milvus_audit"].get("ok"))
         if args.reference_index and args.queries:
             from .indexes import FaissIndex, NumpyIndex
             try: reference = FaissIndex.load(args.reference_index, metric=cfg.index.metric,
@@ -1196,13 +1247,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="embedflow", description="Progressive embedding-model migration")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
-    init = sub.add_parser("init", help="create or validate an EmbedFlow YAML configuration"); init.add_argument("--config", default="embedflow.yaml"); init.add_argument("--source-model"); init.add_argument("--target-model"); init.add_argument("--documents"); init.add_argument("--index"); init.add_argument("--cache"); init.add_argument("--queries", help="optional JSONL probe queries to run during initialization"); init.add_argument("--kmax", type=int); init.add_argument("--backend", choices=["faiss", "qdrant", "pgvector", "pinecone"], default="faiss"); init.add_argument("--dimension", type=int, default=64); init.add_argument("--index-name"); init.add_argument("--namespace", default=""); init.add_argument("--text-metadata-field"); init.add_argument("--build-index", action="store_true"); init.add_argument("--device", default="cpu"); init.add_argument("--demo", action="store_true"); init.set_defaults(func=cmd_init)
+    init = sub.add_parser("init", help="create or validate an EmbedFlow YAML configuration"); init.add_argument("--config", default="embedflow.yaml"); init.add_argument("--source-model"); init.add_argument("--target-model"); init.add_argument("--documents"); init.add_argument("--index"); init.add_argument("--cache"); init.add_argument("--queries", help="optional JSONL probe queries to run during initialization"); init.add_argument("--kmax", type=int); init.add_argument("--backend", choices=["faiss", "qdrant", "pgvector", "pinecone", "milvus"], default="faiss"); init.add_argument("--dimension", type=int, default=64); init.add_argument("--index-name"); init.add_argument("--namespace", default=""); init.add_argument("--text-metadata-field"); init.add_argument("--uri", help="Milvus URI"); init.add_argument("--token-env", default="EMBEDFLOW_MILVUS_TOKEN"); init.add_argument("--database", default="default"); init.add_argument("--id-field", default="id"); init.add_argument("--vector-field", default="embedding"); init.add_argument("--milvus-text-field", default="content"); init.add_argument("--partition-names", action="append", default=[]); init.add_argument("--auto-load", action="store_true"); init.add_argument("--build-index", action="store_true"); init.add_argument("--device", default="cpu"); init.add_argument("--demo", action="store_true"); init.set_defaults(func=cmd_init)
     migrate_cmd = sub.add_parser("migrate", help="connect an existing index and start progressive migration")
-    migrate_cmd.add_argument("--index", required=True, help="FAISS path, Qdrant URL/path, pgvector DSN, or Pinecone host")
+    migrate_cmd.add_argument("--index", required=True, help="FAISS path, Qdrant URL/path, pgvector DSN, Pinecone host, or Milvus URI")
     migrate_cmd.add_argument("--documents", help="JSONL document store with id/text fields; pgvector can read its text_column")
     migrate_cmd.add_argument("--old-model", required=True, help="source/legacy embedding model ID or local path")
     migrate_cmd.add_argument("--new-model", required=True, help="target embedding model ID or local path")
-    migrate_cmd.add_argument("--backend", choices=["faiss", "qdrant", "pgvector", "pinecone"])
+    migrate_cmd.add_argument("--backend", choices=["faiss", "qdrant", "pgvector", "pinecone", "milvus"])
     migrate_cmd.add_argument("--index-url", help="optional Qdrant URL (otherwise --index is used)")
     migrate_cmd.add_argument("--collection", default="embedflow")
     migrate_cmd.add_argument("--vector-name", help="Qdrant named-vector key, when the collection uses named vectors")
@@ -1219,6 +1270,14 @@ def build_parser() -> argparse.ArgumentParser:
     migrate_cmd.add_argument("--index-name", help="Pinecone index name (host is preferred)")
     migrate_cmd.add_argument("--namespace", default="", help="Pinecone namespace")
     migrate_cmd.add_argument("--text-metadata-field", help="Pinecone metadata field containing document text")
+    migrate_cmd.add_argument("--milvus-uri", dest="milvus_uri", help="Milvus URI (defaults to --index when it is a URI)")
+    migrate_cmd.add_argument("--token-env", default="EMBEDFLOW_MILVUS_TOKEN", help="Milvus token environment variable")
+    migrate_cmd.add_argument("--database", default="default", help="Milvus database")
+    migrate_cmd.add_argument("--id-field", default="id", help="Milvus primary-key field")
+    migrate_cmd.add_argument("--vector-field", default="embedding", help="Milvus dense vector field")
+    migrate_cmd.add_argument("--milvus-text-field", default="content", help="Milvus text field")
+    migrate_cmd.add_argument("--partition-names", action="append", default=[], help="Milvus partition to search (repeatable)")
+    migrate_cmd.add_argument("--auto-load", action="store_true", help="explicitly load a Milvus collection when it is not loaded")
     migrate_cmd.add_argument("--metric", choices=["cosine", "dot", "inner_product", "l2", "euclidean"], default="cosine")
     migrate_cmd.add_argument("--model-root", help="directory containing staged research model snapshots")
     migrate_cmd.add_argument("--config", default="./embedflow.yaml", help="where to save the generated migration config")
@@ -1242,7 +1301,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--documents", help="JSONL document store for direct analysis")
     analyze.add_argument("--index", help="existing FAISS/Numpy index, Qdrant endpoint, pgvector DSN, or Pinecone host")
     analyze.add_argument("--index-ids", help="optional FAISS ID sidecar path (defaults to <index>.ids.json)")
-    analyze.add_argument("--backend", choices=["faiss", "qdrant", "pgvector", "pinecone"], default=None)
+    analyze.add_argument("--backend", choices=["faiss", "qdrant", "pgvector", "pinecone", "milvus"], default=None)
     analyze.add_argument("--metric", choices=["cosine", "dot", "inner_product", "l2", "euclidean"], default="cosine")
     analyze.add_argument("--collection", default="embedflow", help="Qdrant collection for direct analysis")
     analyze.add_argument("--vector-name", help="Qdrant named-vector key")
@@ -1259,6 +1318,14 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--index-name", help="Pinecone index name (host is preferred)")
     analyze.add_argument("--namespace", default="", help="Pinecone namespace")
     analyze.add_argument("--text-metadata-field", help="Pinecone metadata field containing document text")
+    analyze.add_argument("--milvus-uri", dest="milvus_uri", help="Milvus URI")
+    analyze.add_argument("--token-env", default="EMBEDFLOW_MILVUS_TOKEN", help="Milvus token environment variable")
+    analyze.add_argument("--database", default="default", help="Milvus database")
+    analyze.add_argument("--id-field", default="id", help="Milvus primary-key field")
+    analyze.add_argument("--vector-field", default="embedding", help="Milvus dense vector field")
+    analyze.add_argument("--milvus-text-field", default="content", help="Milvus text field")
+    analyze.add_argument("--partition-names", action="append", default=[], help="Milvus partition to search (repeatable)")
+    analyze.add_argument("--auto-load", action="store_true", help="explicitly load a Milvus collection when it is not loaded")
     analyze.add_argument("--source-model", help="legacy/source model ID or local path")
     analyze.add_argument("--target-model", help="desired target model ID or local path")
     analyze.add_argument("--model-root", help="directory containing staged model snapshots")

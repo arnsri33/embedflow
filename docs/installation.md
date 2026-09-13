@@ -32,6 +32,7 @@ python -m pip install -e .
 | `qdrant` | Qdrant client and adapter |
 | `pgvector` | Psycopg 3 binary driver and pgvector adapter |
 | `pinecone` | Official Pinecone Python SDK and adapter |
+| `milvus` | Official pymilvus SDK and adapter |
 | `models` | PyTorch, Transformers, Sentence Transformers, and Hub client |
 | `dashboard` | FastAPI, Uvicorn, and Pydantic |
 | `dev` | Pytest, Ruff, and build tooling |
@@ -65,6 +66,12 @@ environment; see [`integrations/pgvector.md`](integrations/pgvector.md).
 Install the optional adapter with `python -m pip install "embedflow[pinecone]"`.
 Set `PINECONE_API_KEY` in the environment and configure an existing dense
 index host; see [`integrations/pinecone.md`](integrations/pinecone.md).
+
+## Milvus
+
+Install the optional adapter with `python -m pip install "embedflow[milvus]"`.
+Configure an existing collection URI, database, and vector field; see
+[`integrations/milvus.md`](integrations/milvus.md).
 
 ## CPU and GPU
 

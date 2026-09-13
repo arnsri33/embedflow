@@ -14,7 +14,7 @@ target:
   device: cuda
 
 index:
-  backend: faiss                 # faiss, qdrant, pgvector, or pinecone
+  backend: faiss                 # faiss, qdrant, pgvector, pinecone, or milvus
   path: ./legacy.index
   ids: ./legacy.index.ids.json   # FAISS sidecar
   metric: cosine
@@ -24,6 +24,8 @@ index:
   #                 hnsw_ef_search, ivfflat_probes
   # Pinecone fields: host (preferred) or index_name, api_key_env, namespace,
   #                  text_metadata_field
+  # Milvus fields: uri, token_env, database, collection, id_field, vector_field,
+  #                text_field, partition_names, search_params, auto_load
 
 documents:
   path: ./documents.jsonl
@@ -95,6 +97,15 @@ EMBEDFLOW_PINECONE_INDEX_NAME
 EMBEDFLOW_PINECONE_NAMESPACE
 EMBEDFLOW_PINECONE_TEXT_METADATA_FIELD
 EMBEDFLOW_PINECONE_API_KEY_ENV
+EMBEDFLOW_MILVUS_URI
+EMBEDFLOW_MILVUS_TOKEN_ENV
+EMBEDFLOW_MILVUS_DATABASE
+EMBEDFLOW_MILVUS_COLLECTION
+EMBEDFLOW_MILVUS_ID_FIELD
+EMBEDFLOW_MILVUS_VECTOR_FIELD
+EMBEDFLOW_MILVUS_TEXT_FIELD
+EMBEDFLOW_MILVUS_PARTITIONS
+EMBEDFLOW_MILVUS_AUTO_LOAD
 EMBEDFLOW_INDEX_NPROBE
 EMBEDFLOW_DOCUMENTS_PATH
 EMBEDFLOW_CACHE_PATH

@@ -1,0 +1,26 @@
+source:
+  model: embedflow/demo-source
+  dimension: 64
+target:
+  model: embedflow/demo-target
+  dimension: 64
+index:
+  backend: milvus
+  uri: http://127.0.0.1:19530
+  token_env: EMBEDFLOW_MILVUS_TOKEN
+  database: default
+  collection: embedflow_demo
+  id_field: id
+  vector_field: embedding
+  text_field: content
+  metric: cosine
+  partition_names: []
+  auto_load: false
+documents:
+  path: ./documents.jsonl
+migration:
+  candidate_depth: 10
+  kmax_probe: 50
+cache:
+  path: ./runtime/cache
+state_path: ./runtime/state.json
