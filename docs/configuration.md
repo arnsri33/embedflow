@@ -14,7 +14,7 @@ target:
   device: cuda
 
 index:
-  backend: faiss                 # faiss, qdrant, pgvector, pinecone, or milvus
+  backend: faiss                 # faiss, qdrant, pgvector, pinecone, milvus, or weaviate
   path: ./legacy.index
   ids: ./legacy.index.ids.json   # FAISS sidecar
   metric: cosine
@@ -26,6 +26,9 @@ index:
   #                  text_metadata_field
   # Milvus fields: uri, token_env, database, collection, id_field, vector_field,
   #                text_field, partition_names, search_params, auto_load
+  # Weaviate fields: uri (or http_host/http_port), grpc_host/grpc_port,
+  #                  secure, collection, vector_name, text_property,
+  #                  tenant, api_key_env
 
 documents:
   path: ./documents.jsonl
@@ -106,6 +109,18 @@ EMBEDFLOW_MILVUS_VECTOR_FIELD
 EMBEDFLOW_MILVUS_TEXT_FIELD
 EMBEDFLOW_MILVUS_PARTITIONS
 EMBEDFLOW_MILVUS_AUTO_LOAD
+EMBEDFLOW_WEAVIATE_URI
+EMBEDFLOW_WEAVIATE_HTTP_HOST
+EMBEDFLOW_WEAVIATE_HTTP_PORT
+EMBEDFLOW_WEAVIATE_GRPC_HOST
+EMBEDFLOW_WEAVIATE_GRPC_PORT
+EMBEDFLOW_WEAVIATE_SECURE
+EMBEDFLOW_WEAVIATE_GRPC_SECURE
+EMBEDFLOW_WEAVIATE_API_KEY_ENV
+EMBEDFLOW_WEAVIATE_COLLECTION
+EMBEDFLOW_WEAVIATE_VECTOR_NAME
+EMBEDFLOW_WEAVIATE_TEXT_PROPERTY
+EMBEDFLOW_WEAVIATE_TENANT
 EMBEDFLOW_INDEX_NPROBE
 EMBEDFLOW_DOCUMENTS_PATH
 EMBEDFLOW_CACHE_PATH

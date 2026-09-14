@@ -16,13 +16,15 @@ from .indexes import (
     PineconeDocumentStore,
     PineconeIndex,
     QdrantIndex,
+    WeaviateDocumentStore,
+    WeaviateIndex,
 )
 from .migration.state import DocumentStore
 from .models import load_embedding_model
 from .serving.engine import MigrationEngine
 
 
-def load_documents(cfg: EmbedFlowConfig, index: Any | None = None) -> DocumentStore | PgVectorDocumentStore | PineconeDocumentStore | MilvusDocumentStore:
+def load_documents(cfg: EmbedFlowConfig, index: Any | None = None) -> DocumentStore | PgVectorDocumentStore | PineconeDocumentStore | MilvusDocumentStore | WeaviateDocumentStore:
     """Load the configured document resolver.
 
     A pgvector table commonly stores both the legacy vector and document text.
@@ -54,10 +56,17 @@ def load_documents(cfg: EmbedFlowConfig, index: Any | None = None) -> DocumentSt
             text_field=cfg.index.text_field,
             owns_index=index is None,
         )
+    if backend == "weaviate" and not Path(cfg.documents.path).expanduser().exists():
+        weaviate_index = index if isinstance(index, WeaviateIndex) else WeaviateIndex.from_config(cfg)
+        return WeaviateDocumentStore(
+            weaviate_index,
+            text_property=cfg.index.text_property or cfg.index.text_field,
+            owns_index=index is None,
+        )
     return DocumentStore(cfg.documents.path, cfg.documents.id_field, cfg.documents.text_field)
 
 
-def load_index(cfg: EmbedFlowConfig, documents: DocumentStore | PgVectorDocumentStore | PineconeDocumentStore | MilvusDocumentStore):
+def load_index(cfg: EmbedFlowConfig, documents: DocumentStore | PgVectorDocumentStore | PineconeDocumentStore | MilvusDocumentStore | WeaviateDocumentStore):
     if cfg.index.backend.lower() == "pgvector":
         if isinstance(documents, PgVectorDocumentStore):
             return documents.index
@@ -70,6 +79,10 @@ def load_index(cfg: EmbedFlowConfig, documents: DocumentStore | PgVectorDocument
         if isinstance(documents, MilvusDocumentStore):
             return documents.index
         return MilvusIndex.from_config(cfg, documents=documents.documents)
+    if cfg.index.backend.lower() == "weaviate":
+        if isinstance(documents, WeaviateDocumentStore):
+            return documents.index
+        return WeaviateIndex.from_config(cfg, documents=documents.documents)
     metadata = documents.documents
     if cfg.index.backend.lower() == "faiss":
         try:
@@ -91,7 +104,7 @@ def load_index(cfg: EmbedFlowConfig, documents: DocumentStore | PgVectorDocument
 
 
 def open_engine(config_path: str | Path, device: str | None = None, demo: bool = False,
-                start_worker: bool = True, documents: DocumentStore | PgVectorDocumentStore | PineconeDocumentStore | MilvusDocumentStore | None = None,
+                start_worker: bool = True, documents: DocumentStore | PgVectorDocumentStore | PineconeDocumentStore | MilvusDocumentStore | WeaviateDocumentStore | None = None,
                 allow_empty_index: bool = False) -> MigrationEngine:
     """Load models, a source index, cache, and the shared migration engine.
 

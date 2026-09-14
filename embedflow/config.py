@@ -158,6 +158,17 @@ class IndexConfig:
     partition_names: list[str] = field(default_factory=list)
     search_params: dict[str, Any] = field(default_factory=dict)
     auto_load: bool = False
+    # Weaviate v4 settings. ``uri`` may be a local HTTP endpoint or a cloud
+    # cluster URL; explicit host/port fields are useful for local/custom
+    # deployments and keep gRPC connectivity visible in configuration.
+    http_host: str = "localhost"
+    http_port: int = 8080
+    grpc_host: str | None = None
+    grpc_port: int = 50051
+    secure: bool = False
+    grpc_secure: bool | None = None
+    tenant: str | None = None
+    text_property: str | None = None
 
 
 @dataclass
@@ -263,15 +274,17 @@ class EmbedFlowConfig:
         if self.source.fingerprint == self.target.fingerprint:
             raise ValueError("source and target embedding contracts must differ for migration")
         backend = self.index.backend.lower() if isinstance(self.index.backend, str) else ""
-        if backend not in {"faiss", "qdrant", "pgvector", "pinecone", "milvus"}:
-            raise ValueError("index.backend must be faiss, qdrant, pgvector, pinecone, or milvus")
+        if backend not in {"faiss", "qdrant", "pgvector", "pinecone", "milvus", "weaviate"}:
+            raise ValueError("index.backend must be faiss, qdrant, pgvector, pinecone, milvus, or weaviate")
         allowed_metrics = {"cosine", "dot", "inner_product"}
         if backend in {"pgvector", "milvus"}:
             allowed_metrics |= {"l2", "euclidean"}
         if backend in {"pinecone", "milvus"}:
             allowed_metrics |= {"dotproduct", "l2", "euclidean"}
+        if backend == "weaviate":
+            allowed_metrics |= {"dotproduct", "l2", "euclidean"}
         if not isinstance(self.index.metric, str) or self.index.metric.lower() not in allowed_metrics:
-            names = "cosine, dot, inner_product" + (", dotproduct, l2, or euclidean" if backend in {"pinecone", "milvus"} else ", l2, or euclidean" if backend == "pgvector" else "")
+            names = "cosine, dot, inner_product" + (", dotproduct, l2, or euclidean" if backend in {"pinecone", "milvus", "weaviate"} else ", l2, or euclidean" if backend == "pgvector" else "")
             raise ValueError(f"index.metric must be {names}")
         if backend == "pgvector":
             for label, value in (("index.schema", self.index.schema), ("index.table", self.index.table),
@@ -358,6 +371,32 @@ class EmbedFlowConfig:
                             raise ValueError(f"index.search_params.{name} must be a finite number") from exc
             if not isinstance(self.index.auto_load, bool):
                 raise ValueError("index.auto_load must be a boolean")
+        if backend == "weaviate":
+            for label, value in (("index.collection", self.index.collection),
+                                 ("index.vector_name", self.index.vector_name),
+                                 ("index.text_property", self.index.text_property),
+                                 ("index.api_key_env", self.index.api_key_env),
+                                 ("index.tenant", self.index.tenant),
+                                 ("index.http_host", self.index.http_host),
+                                 ("index.grpc_host", self.index.grpc_host),
+                                 ("index.uri", self.index.uri)):
+                if value is not None and (not isinstance(value, str) or not value.strip() or "\x00" in value):
+                    raise ValueError(f"{label} must be null or a non-empty string without NUL bytes")
+            for label, value in (("index.http_port", self.index.http_port), ("index.grpc_port", self.index.grpc_port)):
+                setattr(self.index, label.split(".")[-1], _integer(value, label, minimum=1))
+            if self.index.http_port > 65535 or self.index.grpc_port > 65535:
+                raise ValueError("Weaviate ports must be between 1 and 65535")
+            if not isinstance(self.index.secure, bool):
+                raise ValueError("index.secure must be a boolean")
+            if self.index.grpc_secure is not None and not isinstance(self.index.grpc_secure, bool):
+                raise ValueError("index.grpc_secure must be null or a boolean")
+            if not isinstance(self.index.namespace, str):
+                # ``namespace`` is not a Weaviate setting, but rejecting an
+                # accidental non-string value here gives a clearer config
+                # error than allowing it to leak into a client call.
+                raise ValueError("index.namespace must be a string")
+            if not any(isinstance(value, str) and value.strip() for value in (self.index.uri, self.index.http_host, self.index.path)):
+                raise ValueError("index.backend=weaviate requires index.uri or index.http_host")
         candidate_depth = self.migration.candidate_depth
         if isinstance(candidate_depth, str) and candidate_depth.strip().lower() == "auto":
             candidate_depth = "auto"
@@ -379,6 +418,11 @@ class EmbedFlowConfig:
                 raise ValueError("Milvus migration.candidate_depth must be <= 16384")
             if self.migration.kmax_probe > 16_384:
                 raise ValueError("Milvus migration.kmax_probe must be <= 16384")
+        if backend == "weaviate":
+            if candidate_depth != "auto" and int(candidate_depth) > 10_000:
+                raise ValueError("Weaviate migration.candidate_depth must be <= 10000")
+            if self.migration.kmax_probe > 10_000:
+                raise ValueError("Weaviate migration.kmax_probe must be <= 10000")
         self.migration.max_sync_misses = _integer(self.migration.max_sync_misses, "migration.max_sync_misses", minimum=0)
         self.migration.background_batch_size = _integer(self.migration.background_batch_size, "migration.background_batch_size", minimum=1)
         self.migration.max_retries = _integer(self.migration.max_retries, "migration.max_retries", minimum=1)
@@ -389,6 +433,8 @@ class EmbedFlowConfig:
             raise ValueError("probe.kmax must be at least 10")
         if backend == "pinecone" and self.probe.kmax > 10_000:
             raise ValueError("Pinecone probe.kmax must be <= 10000")
+        if backend == "weaviate" and self.probe.kmax > 10_000:
+            raise ValueError("Weaviate probe.kmax must be <= 10000")
         if not self.probe.k_values:
             raise ValueError("probe.k_values must contain positive integers")
         try:
@@ -424,6 +470,8 @@ def from_dict(raw: dict[str, Any], *, validate: bool = True) -> EmbedFlowConfig:
     backend_name = str(index_raw.get("backend", "faiss")).lower()
     if backend_name == "pinecone" and "api_key_env" not in index_raw:
         index_raw["api_key_env"] = "PINECONE_API_KEY"
+    if backend_name == "weaviate" and "api_key_env" not in index_raw:
+        index_raw["api_key_env"] = "WEAVIATE_API_KEY"
     if backend_name == "milvus":
         if "token_env" not in index_raw:
             index_raw["token_env"] = "EMBEDFLOW_MILVUS_TOKEN"
@@ -578,6 +626,18 @@ def _apply_environment_overrides(cfg: EmbedFlowConfig) -> None:
         "EMBEDFLOW_MILVUS_VECTOR_FIELD": (cfg.index, "vector_field"),
         "EMBEDFLOW_MILVUS_TEXT_FIELD": (cfg.index, "text_field"),
         "EMBEDFLOW_MILVUS_PARTITIONS": (cfg.index, "partition_names"),
+        "EMBEDFLOW_WEAVIATE_URI": (cfg.index, "uri"),
+        "EMBEDFLOW_WEAVIATE_HTTP_HOST": (cfg.index, "http_host"),
+        "EMBEDFLOW_WEAVIATE_HTTP_PORT": (cfg.index, "http_port"),
+        "EMBEDFLOW_WEAVIATE_GRPC_HOST": (cfg.index, "grpc_host"),
+        "EMBEDFLOW_WEAVIATE_GRPC_PORT": (cfg.index, "grpc_port"),
+        "EMBEDFLOW_WEAVIATE_SECURE": (cfg.index, "secure"),
+        "EMBEDFLOW_WEAVIATE_GRPC_SECURE": (cfg.index, "grpc_secure"),
+        "EMBEDFLOW_WEAVIATE_API_KEY_ENV": (cfg.index, "api_key_env"),
+        "EMBEDFLOW_WEAVIATE_COLLECTION": (cfg.index, "collection"),
+        "EMBEDFLOW_WEAVIATE_VECTOR_NAME": (cfg.index, "vector_name"),
+        "EMBEDFLOW_WEAVIATE_TEXT_PROPERTY": (cfg.index, "text_property"),
+        "EMBEDFLOW_WEAVIATE_TENANT": (cfg.index, "tenant"),
         "EMBEDFLOW_DOCUMENTS_PATH": (cfg.documents, "path"),
         "EMBEDFLOW_CACHE_PATH": (cfg.cache, "path"),
         "EMBEDFLOW_STATE_PATH": (cfg, "state_path"),
@@ -587,6 +647,14 @@ def _apply_environment_overrides(cfg: EmbedFlowConfig) -> None:
         value = os.environ.get(variable)
         if value is not None and value.strip():
             setattr(target, field_name, value.strip())
+    for variable, field_name in (("EMBEDFLOW_WEAVIATE_SECURE", "secure"),
+                                 ("EMBEDFLOW_WEAVIATE_GRPC_SECURE", "grpc_secure")):
+        value = os.environ.get(variable)
+        if value is not None and value.strip():
+            normalized = value.strip().lower()
+            if normalized not in {"0", "1", "true", "false", "yes", "no"}:
+                raise ValueError(f"{variable} must be true or false")
+            setattr(cfg.index, field_name, normalized in {"1", "true", "yes"})
     candidate = os.environ.get("EMBEDFLOW_CANDIDATE_DEPTH")
     if candidate:
         if candidate.strip().lower() == "auto":

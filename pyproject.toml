@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "embedflow"
-version = "0.4.0"
+version = "0.5.0"
 description = "Progressive embedding-model migration over existing vector indexes."
 readme = "README_PYPI.md"
 requires-python = ">=3.10"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 authors = [{ name = "Arnav Srivastav" }]
-keywords = ["embeddings", "vector-search", "rag", "information-retrieval", "faiss", "qdrant", "pgvector", "pinecone", "milvus"]
+keywords = ["embeddings", "vector-search", "rag", "information-retrieval", "faiss", "qdrant", "pgvector", "pinecone", "milvus", "weaviate"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -34,6 +34,7 @@ qdrant = ["qdrant-client>=1.9"]
 pgvector = ["psycopg[binary]>=3.2"]
 pinecone = ["pinecone>=6.0"]
 milvus = ["pymilvus>=2.5.5,<4"]
+weaviate = ["weaviate-client>=4.16,<5"]
 models = ["huggingface-hub>=0.34,<1.0", "transformers>=4.45,<5.0", "sentence-transformers>=3.0", "torch>=2.2"]
 dashboard = ["fastapi>=0.100", "uvicorn[standard]>=0.23", "pydantic>=2.0"]
 all = [
@@ -42,6 +43,7 @@ all = [
   "psycopg[binary]>=3.2",
   "pinecone>=6.0",
   "pymilvus>=2.5.5,<4",
+  "weaviate-client>=4.16,<5",
   "huggingface-hub>=0.34,<1.0",
   "transformers>=4.45,<5.0",
   "sentence-transformers>=3.0",

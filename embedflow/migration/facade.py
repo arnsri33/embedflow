@@ -34,6 +34,8 @@ from ..indexes import (
     PgVectorIndex,
     PineconeDocumentStore,
     PineconeIndex,
+    WeaviateDocumentStore,
+    WeaviateIndex,
 )
 from ..indexes.base import VectorIndex
 from ..migration.compatibility import run_probe, save_probe
@@ -198,7 +200,7 @@ def migrate(
     index: str | Path | VectorIndex,
     old_model: str | Path | EmbeddingModel,
     new_model: str | Path | EmbeddingModel,
-    documents: str | Path | DocumentStore | PgVectorDocumentStore | PineconeDocumentStore | MilvusDocumentStore | None = None,
+    documents: str | Path | DocumentStore | PgVectorDocumentStore | PineconeDocumentStore | MilvusDocumentStore | WeaviateDocumentStore | None = None,
     backend: str | None = None,
     index_url: str | None = None,
     collection: str = "embedflow",
@@ -225,6 +227,14 @@ def migrate(
     partition_names: list[str] | None = None,
     search_params: dict[str, Any] | None = None,
     auto_load: bool = False,
+    http_host: str = "localhost",
+    http_port: int = 8080,
+    grpc_host: str | None = None,
+    grpc_port: int = 50051,
+    secure: bool = False,
+    grpc_secure: bool | None = None,
+    tenant: str | None = None,
+    text_property: str | None = None,
     metric: str = "cosine",
     model_root: str | Path | None = None,
     device: str | None = None,
@@ -242,14 +252,15 @@ def migrate(
     """Start progressive migration over an existing index.
 
     ``index`` may be an existing EmbedFlow ``VectorIndex`` instance or a path
-    to a FAISS index, Qdrant path/URL, pgvector DSN, or Pinecone host.  Model
+    to a FAISS index, Qdrant path/URL, pgvector DSN, Pinecone host, or Weaviate
+    endpoint. Model
     strings are revision-hydrated when they are registered by the research
     contract; model objects can be supplied by an application directly.
     ``probe_queries`` is optional so serving can start immediately.  When
     supplied, the existing frozen T2-v1 implementation is run before the
     session is returned.
     """
-    if isinstance(documents, (DocumentStore, PgVectorDocumentStore, PineconeDocumentStore, MilvusDocumentStore)):
+    if isinstance(documents, (DocumentStore, PgVectorDocumentStore, PineconeDocumentStore, MilvusDocumentStore, WeaviateDocumentStore)):
         document_store = documents
     elif documents is None:
         document_store = None
@@ -280,8 +291,8 @@ def migrate(
         else:
             index_path = str(index_url or index)
             index_backend = _infer_backend(index_path, backend)
-            if index_backend not in {"faiss", "qdrant", "pgvector", "pinecone", "milvus"}:
-                raise ValueError("backend must be faiss, qdrant, pgvector, pinecone, or milvus")
+            if index_backend not in {"faiss", "qdrant", "pgvector", "pinecone", "milvus", "weaviate"}:
+                raise ValueError("backend must be faiss, qdrant, pgvector, pinecone, milvus, or weaviate")
 
         explicit_url = index_url
         if index_backend == "pgvector" and explicit_url is None and "://" in index_path:
@@ -315,8 +326,16 @@ def migrate(
             index_path = "./legacy.index"
             explicit_url = None
             token_env = token_env or "EMBEDFLOW_MILVUS_TOKEN"
-        if document_store is None and index_backend not in {"pgvector", "pinecone", "milvus"}:
-            raise ValueError("documents is required for FAISS and Qdrant; pgvector/Pinecone/Milvus can resolve text from their configured text fields")
+        weaviate_uri = uri
+        if index_backend == "weaviate":
+            if weaviate_uri is None and index_path and (index_path.startswith(("http://", "https://")) or index_path.startswith("weaviate://")):
+                weaviate_uri = index_path.replace("weaviate://", "http://", 1)
+            index_path = "./legacy.index"
+            explicit_url = None
+            if not api_key_env or api_key_env == "QDRANT_API_KEY":
+                api_key_env = "WEAVIATE_API_KEY"
+        if document_store is None and index_backend not in {"pgvector", "pinecone", "milvus", "weaviate"}:
+            raise ValueError("documents is required for FAISS and Qdrant; pgvector/Pinecone/Milvus/Weaviate can resolve text from their configured text fields")
         cfg = EmbedFlowConfig(
             source=source_cfg,
             target=target_cfg,
@@ -327,10 +346,13 @@ def migrate(
                               hnsw_ef_search=hnsw_ef_search, ivfflat_probes=ivfflat_probes,
                               host=pinecone_host, index_name=pinecone_index_name,
                               namespace=namespace, text_metadata_field=text_metadata_field,
-                              uri=milvus_uri, token_env=token_env, database=database,
+                              uri=weaviate_uri if index_backend == "weaviate" else milvus_uri,
+                              token_env=token_env, database=database,
                               id_field=id_field, vector_field=vector_field, text_field=text_field,
                               partition_names=list(partition_names or []), search_params=dict(search_params or {}),
-                              auto_load=auto_load),
+                              auto_load=auto_load, http_host=http_host, http_port=http_port,
+                              grpc_host=grpc_host, grpc_port=grpc_port, secure=secure,
+                              grpc_secure=grpc_secure, tenant=tenant, text_property=text_property),
             documents=DocumentsConfig(path=str(document_store.path) if document_store is not None else "./documents.jsonl"),
             migration=MigrationConfig(candidate_depth=int(candidate_depth), kmax_probe=max(int(kmax_probe), int(candidate_depth)),
                                       max_sync_misses=int(max_sync_misses), background_batch_size=int(background_batch_size)),
@@ -350,6 +372,9 @@ def migrate(
                 elif index_backend == "milvus":
                     source_index = MilvusIndex.from_config(cfg)
                     document_store = MilvusDocumentStore(source_index, text_field=cfg.index.text_field, owns_index=False)
+                elif index_backend == "weaviate":
+                    source_index = WeaviateIndex.from_config(cfg)
+                    document_store = WeaviateDocumentStore(source_index, text_property=cfg.index.text_property or cfg.index.text_field, owns_index=False)
                 else:
                     source_index = PgVectorIndex.from_config(cfg)
                     document_store = PgVectorDocumentStore(source_index, text_field=cfg.index.text_column or "content", owns_index=False)
@@ -362,8 +387,10 @@ def migrate(
                 document_store = PineconeDocumentStore(source_index, text_field=cfg.index.text_metadata_field, owns_index=False)
             elif isinstance(source_index, MilvusIndex):
                 document_store = MilvusDocumentStore(source_index, text_field=cfg.index.text_field, owns_index=False)
+            elif isinstance(source_index, WeaviateIndex):
+                document_store = WeaviateDocumentStore(source_index, text_property=cfg.index.text_property or cfg.index.text_field, owns_index=False)
             else:
-                raise ValueError("documents is required unless the supplied index is a pgvector, Pinecone, or Milvus backend")
+                raise ValueError("documents is required unless the supplied index is a pgvector, Pinecone, Milvus, or Weaviate backend")
         if int(source_index.dimension) != int(source_model.dimension):
             raise ValueError(f"source model dimension {source_model.dimension} != existing index dimension {source_index.dimension}")
         stored_fingerprint = source_index.metadata().get("model_fingerprint")

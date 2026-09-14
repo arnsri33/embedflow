@@ -64,6 +64,10 @@ def _index_display(cfg: EmbedFlowConfig) -> str:
     if cfg.index.backend.lower() == "milvus":
         endpoint = cfg.index.uri or cfg.index.path or "configured endpoint"
         return f"{endpoint} / {cfg.index.database}.{cfg.index.collection}"
+    if cfg.index.backend.lower() == "weaviate":
+        endpoint = cfg.index.uri or f"{cfg.index.http_host}:{cfg.index.http_port}"
+        tenant = f", tenant={cfg.index.tenant!r}" if cfg.index.tenant else ""
+        return f"{endpoint} / {cfg.index.collection} (vector={cfg.index.vector_name or '<default>'}{tenant})"
     return str(cfg.index.path)
 
 
@@ -149,10 +153,10 @@ def _direct_analysis_config(args: argparse.Namespace) -> tuple[Path, EmbedFlowCo
     backend = args.backend
     if backend is None:
         lowered_index = index_value.strip().lower()
-        backend = "pgvector" if lowered_index.startswith(("postgresql://", "postgres://")) else ("pinecone" if ".pinecone.io" in lowered_index else ("milvus" if lowered_index.startswith(("milvus://", "milvus+grpc://", "http://localhost:19530", "http://127.0.0.1:19530", "https://localhost:19530", "https://127.0.0.1:19530")) else ("qdrant" if "://" in lowered_index else "faiss")))
-    if not args.documents and backend not in {"pinecone", "milvus"}:
-        raise ValueError("direct analyze requires --documents unless --backend pinecone/milvus uses backend text")
-    remote_url = index_value if backend in {"qdrant", "pgvector", "milvus"} and "://" in index_value else None
+        backend = "pgvector" if lowered_index.startswith(("postgresql://", "postgres://")) else ("pinecone" if ".pinecone.io" in lowered_index else ("milvus" if lowered_index.startswith(("milvus://", "milvus+grpc://", "http://localhost:19530", "http://127.0.0.1:19530", "https://localhost:19530", "https://127.0.0.1:19530")) else ("weaviate" if lowered_index.startswith(("weaviate://", "http://localhost:8080", "http://127.0.0.1:8080", "https://localhost:8080", "https://127.0.0.1:8080")) else ("qdrant" if "://" in lowered_index else "faiss"))))
+    if not args.documents and backend not in {"pinecone", "milvus", "weaviate"}:
+        raise ValueError("direct analyze requires --documents unless --backend pinecone/milvus/weaviate uses backend text")
+    remote_url = index_value if backend in {"qdrant", "pgvector", "milvus", "weaviate"} and "://" in index_value else None
     if backend == "pgvector" and remote_url:
         # A one-shot DSN is convenient, but never write credentials into the
         # generated reusable YAML. Keep it in this process under the declared
@@ -165,6 +169,8 @@ def _direct_analysis_config(args: argparse.Namespace) -> tuple[Path, EmbedFlowCo
         remote_url = None
     elif backend == "milvus":
         index_path = "./legacy.index"
+    elif backend == "weaviate":
+        index_path = "./legacy.index"
     else:
         index_path = index_value if remote_url else str(Path(index_value).expanduser().resolve())
     pinecone_host = getattr(args, "host", None)
@@ -173,6 +179,8 @@ def _direct_analysis_config(args: argparse.Namespace) -> tuple[Path, EmbedFlowCo
     api_key_env = args.api_key_env
     if backend == "pinecone" and (not api_key_env or api_key_env == "QDRANT_API_KEY"):
         api_key_env = "PINECONE_API_KEY"
+    if backend == "weaviate" and (not api_key_env or api_key_env == "QDRANT_API_KEY"):
+        api_key_env = "WEAVIATE_API_KEY"
     cfg = EmbedFlowConfig(
         source=source,
         target=target,
@@ -185,7 +193,7 @@ def _direct_analysis_config(args: argparse.Namespace) -> tuple[Path, EmbedFlowCo
                           ivfflat_probes=args.ivfflat_probes, host=pinecone_host,
                           index_name=getattr(args, "index_name", None), namespace=getattr(args, "namespace", ""),
                           text_metadata_field=getattr(args, "text_metadata_field", None),
-                          uri=getattr(args, "milvus_uri", None) or remote_url,
+                          uri=getattr(args, "milvus_uri", None) or getattr(args, "weaviate_uri", None) or remote_url,
                           token_env=getattr(args, "token_env", "EMBEDFLOW_MILVUS_TOKEN"),
                           database=getattr(args, "database", "default"),
                           id_field=getattr(args, "id_field", "id"),
@@ -193,7 +201,15 @@ def _direct_analysis_config(args: argparse.Namespace) -> tuple[Path, EmbedFlowCo
                           text_field=getattr(args, "milvus_text_field", "content"),
                           partition_names=list(getattr(args, "partition_names", []) or []),
                           search_params=dict(getattr(args, "search_params", {}) or {}),
-                          auto_load=bool(getattr(args, "auto_load", False))),
+                          auto_load=bool(getattr(args, "auto_load", False)),
+                          http_host=getattr(args, "http_host", "localhost"),
+                          http_port=getattr(args, "http_port", 8080),
+                          grpc_host=getattr(args, "grpc_host", None),
+                          grpc_port=getattr(args, "grpc_port", 50051),
+                          secure=bool(getattr(args, "secure", False)),
+                          grpc_secure=getattr(args, "grpc_secure", None),
+                          tenant=getattr(args, "tenant", None),
+                          text_property=getattr(args, "text_property", None)),
         documents=DocumentsConfig(path=str(Path(args.documents).expanduser().resolve()) if args.documents else "./documents.jsonl"),
         migration=MigrationConfig(candidate_depth="auto", kmax_probe=int(args.kmax or 500), probe_queries=int(args.limit or 100)),
         cache=CacheConfig(path=str(output_dir / "embedflow_cache")),
@@ -369,20 +385,30 @@ def _save_default_config(path: Path, args: argparse.Namespace) -> None:
     index_value = args.index or "./legacy.index"
     cfg = EmbedFlowConfig(source=source, target=target,
                           index=IndexConfig(backend=backend,
-                                            path="./legacy.index" if backend in {"pinecone", "milvus"} else index_value,
+                                            path="./legacy.index" if backend in {"pinecone", "milvus", "weaviate"} else index_value,
                                             host=index_value if backend == "pinecone" and args.index else None,
-                                            api_key_env="PINECONE_API_KEY" if backend == "pinecone" else None if backend == "milvus" else "QDRANT_API_KEY",
+                                            api_key_env="PINECONE_API_KEY" if backend == "pinecone" else "WEAVIATE_API_KEY" if backend == "weaviate" else None if backend == "milvus" else "QDRANT_API_KEY",
                                             index_name=getattr(args, "index_name", None),
+                                            collection=getattr(args, "collection", "embedflow"),
+                                            vector_name=getattr(args, "vector_name", None),
                                             namespace=getattr(args, "namespace", ""),
                                             text_metadata_field=getattr(args, "text_metadata_field", None),
-                                            uri=(getattr(args, "uri", None) or (index_value if "://" in str(index_value) else None)) if backend == "milvus" else None,
+                                            uri=(getattr(args, "uri", None) or (index_value if "://" in str(index_value) else None)) if backend in {"milvus", "weaviate"} else None,
                                             token_env=getattr(args, "token_env", "EMBEDFLOW_MILVUS_TOKEN"),
                                             database=getattr(args, "database", "default"),
                                             id_field=getattr(args, "id_field", "id"),
                                             vector_field=getattr(args, "vector_field", "embedding"),
                                             text_field=getattr(args, "milvus_text_field", "content"),
                                             partition_names=list(getattr(args, "partition_names", []) or []),
-                                            auto_load=bool(getattr(args, "auto_load", False))),
+                                            auto_load=bool(getattr(args, "auto_load", False)),
+                                            http_host=getattr(args, "http_host", "localhost"),
+                                            http_port=getattr(args, "http_port", 8080),
+                                            grpc_host=getattr(args, "grpc_host", None),
+                                            grpc_port=getattr(args, "grpc_port", 50051),
+                                            secure=bool(getattr(args, "secure", False)),
+                                            grpc_secure=getattr(args, "grpc_secure", None),
+                                            tenant=getattr(args, "tenant", None),
+                                            text_property=getattr(args, "text_property", None)),
                           documents=DocumentsConfig(path=args.documents or "./documents.jsonl"),
                           cache=CacheConfig(path=args.cache or "./embedflow_cache"))
     save_config(cfg, path); print(f"wrote {path}")
@@ -394,8 +420,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         if not args.source_model and not args.target_model and not args.documents and not args.index:
             if sys.stdin.isatty():
                 print("EmbedFlow initialization")
-                backend_choice = input("Existing index backend [1] FAISS / [2] Qdrant / [3] pgvector / [4] Pinecone / [5] Milvus (1): ").strip()
-                args.backend = {"2": "qdrant", "3": "pgvector", "4": "pinecone", "5": "milvus"}.get(backend_choice, "faiss")
+                backend_choice = input("Existing index backend [1] FAISS / [2] Qdrant / [3] pgvector / [4] Pinecone / [5] Milvus / [6] Weaviate (1): ").strip()
+                args.backend = {"2": "qdrant", "3": "pgvector", "4": "pinecone", "5": "milvus", "6": "weaviate"}.get(backend_choice, "faiss")
                 args.source_model = input("Source model: ").strip() or "embedflow/demo-source"
                 args.target_model = input("Target model: ").strip() or "embedflow/demo-target"
                 args.documents = input("Corpus JSONL path (./documents.jsonl): ").strip() or "./documents.jsonl"
@@ -405,25 +431,30 @@ def cmd_init(args: argparse.Namespace) -> int:
         _save_default_config(path, args)
     cfg = load_config(path)
     docs = load_documents(cfg)
-    print(f"loaded {docs.size():,} documents from {cfg.documents.path}")
-    if cfg.index.backend == "faiss" and not Path(cfg.index.path).exists():
-        if not args.build_index: raise FileNotFoundError(f"legacy FAISS index missing: {cfg.index.path}; pass --build-index to create it")
-        model = load_embedding_model(cfg.source, model_root=path.parent / "models", device=args.device, demo=args.demo)
-        try: build_faiss_from_documents(cfg, model, docs); print(f"built legacy index at {cfg.index.path}")
-        finally: model.close()
-    # Ensure dimensions and index metadata are checked before the user serves.
-    engine = open_engine(path, device=args.device, demo=args.demo, start_worker=False)
     try:
-        if args.queries:
-            print("Testing candidate compatibility…")
-            result = run_probe(engine.source_model, engine.target_model, engine.source_index, docs,
-                               _load_queries(args.queries), kmax=args.kmax or cfg.migration.kmax_probe,
-                               seed=42, limit=cfg.migration.probe_queries)
-            save_probe(result, Path(cfg.state_path).with_name("probe_result.json"))
-            print(f"Result: {result['diagnostic']}; Recommended candidate depth: K={result['recommended_k']}")
-        print("configuration validated; run `embedflow analyze` then `embedflow serve`")
-        _json(engine.plan.to_dict())
-    finally: engine.close()
+        print(f"loaded {docs.size():,} documents from {cfg.documents.path}")
+        if cfg.index.backend == "faiss" and not Path(cfg.index.path).exists():
+            if not args.build_index: raise FileNotFoundError(f"legacy FAISS index missing: {cfg.index.path}; pass --build-index to create it")
+            model = load_embedding_model(cfg.source, model_root=path.parent / "models", device=args.device, demo=args.demo)
+            try: build_faiss_from_documents(cfg, model, docs); print(f"built legacy index at {cfg.index.path}")
+            finally: model.close()
+        # Ensure dimensions and index metadata are checked before the user serves.
+        engine = open_engine(path, device=args.device, demo=args.demo, start_worker=False)
+        try:
+            if args.queries:
+                print("Testing candidate compatibility…")
+                result = run_probe(engine.source_model, engine.target_model, engine.source_index, docs,
+                                   _load_queries(args.queries), kmax=args.kmax or cfg.migration.kmax_probe,
+                                   seed=42, limit=cfg.migration.probe_queries)
+                save_probe(result, Path(cfg.state_path).with_name("probe_result.json"))
+                print(f"Result: {result['diagnostic']}; Recommended candidate depth: K={result['recommended_k']}")
+            print("configuration validated; run `embedflow analyze` then `embedflow serve`")
+            _json(engine.plan.to_dict())
+        finally: engine.close()
+    finally:
+        close_documents = getattr(docs, "close", None)
+        if callable(close_documents):
+            close_documents()
     return 0
 
 def cmd_migrate(args: argparse.Namespace) -> int:
@@ -454,7 +485,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             index_name=getattr(args, "index_name", None),
             namespace=getattr(args, "namespace", ""),
             text_metadata_field=getattr(args, "text_metadata_field", None),
-            uri=getattr(args, "milvus_uri", None),
+            uri=getattr(args, "milvus_uri", None) or getattr(args, "weaviate_uri", None),
             token_env=getattr(args, "token_env", "EMBEDFLOW_MILVUS_TOKEN"),
             database=getattr(args, "database", "default"),
             id_field=getattr(args, "id_field", "id"),
@@ -462,6 +493,14 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             text_field=getattr(args, "milvus_text_field", "content"),
             partition_names=list(getattr(args, "partition_names", []) or []),
             auto_load=bool(getattr(args, "auto_load", False)),
+            http_host=getattr(args, "http_host", "localhost"),
+            http_port=getattr(args, "http_port", 8080),
+            grpc_host=getattr(args, "grpc_host", None),
+            grpc_port=getattr(args, "grpc_port", 50051),
+            secure=bool(getattr(args, "secure", False)),
+            grpc_secure=getattr(args, "grpc_secure", None),
+            tenant=getattr(args, "tenant", None),
+            text_property=getattr(args, "text_property", None),
             metric=args.metric,
             model_root=args.model_root,
             device=_normalize_device(args.device),
@@ -593,7 +632,9 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                                                   text_column=cfg.index.text_column, hnsw_ef_search=cfg.index.hnsw_ef_search,
                                                   ivfflat_probes=cfg.index.ivfflat_probes, host=cfg.index.host,
                                                   index_name=cfg.index.index_name, namespace=cfg.index.namespace,
-                                                  text_metadata_field=cfg.index.text_metadata_field)
+                                                  text_metadata_field=cfg.index.text_metadata_field,
+                                                  weaviate_uri=cfg.index.uri, tenant=cfg.index.tenant,
+                                                  text_property=cfg.index.text_property)
             evaluation_indexes.append(native_index)
         if args.reference_index:
             reference_index = _load_evaluation_index(args.reference_index, cfg.index.backend, cfg.index.metric, docs.documents,
@@ -604,7 +645,9 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                                                      text_column=cfg.index.text_column, hnsw_ef_search=cfg.index.hnsw_ef_search,
                                                      ivfflat_probes=cfg.index.ivfflat_probes, host=cfg.index.host,
                                                      index_name=cfg.index.index_name, namespace=cfg.index.namespace,
-                                                     text_metadata_field=cfg.index.text_metadata_field)
+                                                     text_metadata_field=cfg.index.text_metadata_field,
+                                                     weaviate_uri=cfg.index.uri, tenant=cfg.index.tenant,
+                                                     text_property=cfg.index.text_property)
             evaluation_indexes.append(reference_index)
         k_values = _parse_k_values(args.k_values or ",".join(map(str, cfg.probe.k_values)))
         if native_rankings is not None:
@@ -672,10 +715,11 @@ def _load_evaluation_index(path: str, backend: str, metric: str, documents: dict
                            *, dsn_env: str | None = "EMBEDFLOW_PGVECTOR_DSN", schema: str = "public",
                            table: str = "documents", id_column: str = "id", vector_column: str = "embedding",
                            text_column: str | None = "content", hnsw_ef_search: int | None = None,
-                           ivfflat_probes: int | None = None, host: str | None = None,
-                           index_name: str | None = None, namespace: str = "",
-                           text_metadata_field: str | None = None):
-    from .indexes import FaissIndex, MilvusIndex, NumpyIndex, PgVectorIndex, PineconeIndex, QdrantIndex
+                                                   ivfflat_probes: int | None = None, host: str | None = None,
+                                                   index_name: str | None = None, namespace: str = "",
+                           text_metadata_field: str | None = None, weaviate_uri: str | None = None,
+                           tenant: str | None = None, text_property: str | None = None):
+    from .indexes import FaissIndex, MilvusIndex, NumpyIndex, PgVectorIndex, PineconeIndex, QdrantIndex, WeaviateIndex
     if backend == "pgvector":
         return PgVectorIndex.connect(url or None, dsn_env=dsn_env, schema=schema, table=table,
                                      id_column=id_column, vector_column=vector_column, text_column=text_column,
@@ -691,6 +735,11 @@ def _load_evaluation_index(path: str, backend: str, metric: str, documents: dict
                                    token_env=api_key_env if api_key_env != "QDRANT_API_KEY" else "EMBEDFLOW_MILVUS_TOKEN",
                                    database="default", collection=collection, id_field="id", vector_field="embedding",
                                    text_field="content", dimension=dimension, metric=metric, documents=documents)
+    if backend == "weaviate":
+        return WeaviateIndex.connect(uri=weaviate_uri or host or (url if url and "://" in url else path),
+                                     collection=collection, dimension=dimension, metric=metric,
+                                     vector_name=vector_name, text_property=text_property or "content",
+                                     documents=documents, tenant=tenant, api_key_env=api_key_env)
     if backend == "qdrant":
         return QdrantIndex.connect(url or path, collection, dimension, documents=documents, metric=metric,
                                    vector_name=vector_name, api_key_env=api_key_env)
@@ -710,7 +759,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     checks.append({"name": "python", "ok": version >= (3, 10), "detail": platform.python_version()})
     for module, label in (("numpy", "NumPy"), ("yaml", "PyYAML"), ("faiss", "FAISS"), ("torch", "PyTorch"),
                           ("fastapi", "FastAPI"), ("qdrant_client", "qdrant-client"), ("psycopg", "psycopg"),
-                          ("pinecone", "pinecone"), ("pymilvus", "pymilvus")):
+                          ("pinecone", "pinecone"), ("pymilvus", "pymilvus"), ("weaviate", "weaviate-client")):
         available = importlib.util.find_spec(module) is not None
         checks.append({"name": label.lower().replace("-", "_"), "ok": available, "detail": "installed" if available else "not installed (optional where noted)"})
     checks.append({"name": "cuda", "ok": True, "detail": _cuda_detail()})
@@ -723,11 +772,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             pgvector_backend = backend_name == "pgvector"
             pinecone_backend = backend_name == "pinecone"
             milvus_backend = backend_name == "milvus"
-            documents_available = Path(config.documents.path).exists() or pgvector_backend or pinecone_backend or milvus_backend
+            weaviate_backend = backend_name == "weaviate"
+            documents_available = Path(config.documents.path).exists() or pgvector_backend or pinecone_backend or milvus_backend or weaviate_backend
             checks.append({"name": "documents", "ok": documents_available,
                            "detail": ("resolved from pgvector table" if pgvector_backend and not Path(config.documents.path).exists() else
                                       "resolved from Pinecone metadata" if pinecone_backend and not Path(config.documents.path).exists() else
-                                      "resolved from Milvus collection" if milvus_backend and not Path(config.documents.path).exists() else config.documents.path)})
+                                      "resolved from Milvus collection" if milvus_backend and not Path(config.documents.path).exists() else
+                                      "resolved from Weaviate property" if weaviate_backend and not Path(config.documents.path).exists() else config.documents.path)})
             qdrant_endpoint = config.index.url or config.index.path
             if backend_name == "faiss":
                 index_exists = Path(config.index.path).exists()
@@ -738,15 +789,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                                     ".pinecone.io" in str(config.index.path))
             elif milvus_backend:
                 index_exists = bool(config.index.uri or (isinstance(config.index.path, str) and "://" in config.index.path))
+            elif weaviate_backend:
+                index_exists = bool(config.index.uri or config.index.http_host or config.index.path)
             else:
                 index_exists = bool(config.index.url or "://" in str(qdrant_endpoint) or Path(config.index.path).exists())
             checks.append({"name": "index", "ok": index_exists,
-                           "detail": "configured pgvector table" if pgvector_backend else (config.index.host or config.index.index_name or config.index.path if pinecone_backend else config.index.uri or config.index.path if milvus_backend else config.index.path)})
+                           "detail": "configured pgvector table" if pgvector_backend else (config.index.host or config.index.index_name or config.index.path if pinecone_backend else config.index.uri or config.index.path if milvus_backend else config.index.uri or f"{config.index.http_host}:{config.index.http_port}" if weaviate_backend else config.index.path)})
             normalization_ok = not (config.index.metric.lower() == "cosine" and
                                     (config.source.normalization.lower() != "l2" or config.target.normalization.lower() != "l2"))
             checks.append({"name": "normalization", "ok": normalization_ok,
                            "detail": f"metric={config.index.metric}; source={config.source.normalization}; target={config.target.normalization}"})
-            if Path(config.documents.path).exists() and not (pgvector_backend or pinecone_backend or milvus_backend):
+            if Path(config.documents.path).exists() and not (pgvector_backend or pinecone_backend or milvus_backend or weaviate_backend):
                 docs = DocumentStore(config.documents.path, config.documents.id_field, config.documents.text_field)
                 checks.append({"name": "document_rows", "ok": docs.size() > 0, "detail": f"{docs.size():,} rows"})
             if config.index.backend.lower() == "faiss" and Path(config.index.path).exists():
@@ -803,6 +856,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     milvus_index.close()
                 except Exception as exc:
                     checks.append({"name": "milvus_integrity", "ok": False, "detail": str(exc)})
+            if weaviate_backend and index_exists:
+                try:
+                    from .indexes import WeaviateIndex
+                    weaviate_index = WeaviateIndex.from_config(config)
+                    audit = weaviate_index.audit(source_dimension=config.source.dimension)
+                    checks.append({"name": "weaviate_connection", "ok": bool(audit.get("ok")),
+                                   "detail": f"{config.index.collection} vector={config.index.vector_name or '<default>'}" if audit.get("ok") else str(audit.get("checks", {}))})
+                    weaviate_index.close()
+                except Exception as exc:
+                    checks.append({"name": "weaviate_integrity", "ok": False, "detail": str(exc)})
             cache_path = Path(config.cache.path)
             if cache_path.exists():
                 try:
@@ -819,7 +882,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             checks.append({"name": "target_fingerprint", "ok": True, "detail": config.target.fingerprint[:16]})
         except Exception as exc:
             checks.append({"name": "config", "ok": False, "detail": str(exc)})
-    optional_checks = {"faiss", "qdrant_client", "fastapi", "torch", "pytorch", "psycopg", "pinecone", "pymilvus"}
+    optional_checks = {"faiss", "qdrant_client", "fastapi", "torch", "pytorch", "psycopg", "pinecone", "pymilvus", "weaviate"}
     failed = [check for check in checks if not check["ok"] and check["name"] not in optional_checks]
     if args.json:
         _json({"checks": checks, "status": "FAIL" if failed else "PASS"})
@@ -1043,6 +1106,9 @@ def cmd_audit_index(args: argparse.Namespace) -> int:
         if cfg.index.backend.lower() == "milvus":
             result["milvus_audit"] = engine.source_index.audit(source_dimension=engine.source_model.dimension)
             result["checks"]["milvus"] = bool(result["milvus_audit"].get("ok"))
+        if cfg.index.backend.lower() == "weaviate":
+            result["weaviate_audit"] = engine.source_index.audit(source_dimension=engine.source_model.dimension)
+            result["checks"]["weaviate"] = bool(result["weaviate_audit"].get("ok"))
         if args.reference_index and args.queries:
             from .indexes import FaissIndex, NumpyIndex
             try: reference = FaissIndex.load(args.reference_index, metric=cfg.index.metric,
@@ -1247,17 +1313,17 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="embedflow", description="Progressive embedding-model migration")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
-    init = sub.add_parser("init", help="create or validate an EmbedFlow YAML configuration"); init.add_argument("--config", default="embedflow.yaml"); init.add_argument("--source-model"); init.add_argument("--target-model"); init.add_argument("--documents"); init.add_argument("--index"); init.add_argument("--cache"); init.add_argument("--queries", help="optional JSONL probe queries to run during initialization"); init.add_argument("--kmax", type=int); init.add_argument("--backend", choices=["faiss", "qdrant", "pgvector", "pinecone", "milvus"], default="faiss"); init.add_argument("--dimension", type=int, default=64); init.add_argument("--index-name"); init.add_argument("--namespace", default=""); init.add_argument("--text-metadata-field"); init.add_argument("--uri", help="Milvus URI"); init.add_argument("--token-env", default="EMBEDFLOW_MILVUS_TOKEN"); init.add_argument("--database", default="default"); init.add_argument("--id-field", default="id"); init.add_argument("--vector-field", default="embedding"); init.add_argument("--milvus-text-field", default="content"); init.add_argument("--partition-names", action="append", default=[]); init.add_argument("--auto-load", action="store_true"); init.add_argument("--build-index", action="store_true"); init.add_argument("--device", default="cpu"); init.add_argument("--demo", action="store_true"); init.set_defaults(func=cmd_init)
+    init = sub.add_parser("init", help="create or validate an EmbedFlow YAML configuration"); init.add_argument("--config", default="embedflow.yaml"); init.add_argument("--source-model"); init.add_argument("--target-model"); init.add_argument("--documents"); init.add_argument("--index"); init.add_argument("--cache"); init.add_argument("--queries", help="optional JSONL probe queries to run during initialization"); init.add_argument("--kmax", type=int); init.add_argument("--backend", choices=["faiss", "qdrant", "pgvector", "pinecone", "milvus", "weaviate"], default="faiss"); init.add_argument("--dimension", type=int, default=64); init.add_argument("--collection", default="embedflow", help="Qdrant/Milvus/Weaviate collection name"); init.add_argument("--vector-name", help="named vector for Qdrant/Weaviate collections"); init.add_argument("--index-name"); init.add_argument("--namespace", default=""); init.add_argument("--text-metadata-field"); init.add_argument("--text-property"); init.add_argument("--uri", help="Milvus or Weaviate URI"); init.add_argument("--token-env", default="EMBEDFLOW_MILVUS_TOKEN"); init.add_argument("--database", default="default"); init.add_argument("--id-field", default="id"); init.add_argument("--vector-field", default="embedding"); init.add_argument("--milvus-text-field", default="content"); init.add_argument("--partition-names", action="append", default=[]); init.add_argument("--auto-load", action="store_true"); init.add_argument("--http-host", default="localhost"); init.add_argument("--http-port", type=int, default=8080); init.add_argument("--grpc-host"); init.add_argument("--grpc-port", type=int, default=50051); init.add_argument("--secure", action="store_true"); init.add_argument("--grpc-secure", action="store_true"); init.add_argument("--tenant"); init.add_argument("--build-index", action="store_true"); init.add_argument("--device", default="cpu"); init.add_argument("--demo", action="store_true"); init.set_defaults(func=cmd_init)
     migrate_cmd = sub.add_parser("migrate", help="connect an existing index and start progressive migration")
-    migrate_cmd.add_argument("--index", required=True, help="FAISS path, Qdrant URL/path, pgvector DSN, Pinecone host, or Milvus URI")
+    migrate_cmd.add_argument("--index", required=True, help="FAISS path, Qdrant URL/path, pgvector DSN, Pinecone host, Milvus URI, or Weaviate URI")
     migrate_cmd.add_argument("--documents", help="JSONL document store with id/text fields; pgvector can read its text_column")
     migrate_cmd.add_argument("--old-model", required=True, help="source/legacy embedding model ID or local path")
     migrate_cmd.add_argument("--new-model", required=True, help="target embedding model ID or local path")
-    migrate_cmd.add_argument("--backend", choices=["faiss", "qdrant", "pgvector", "pinecone", "milvus"])
+    migrate_cmd.add_argument("--backend", choices=["faiss", "qdrant", "pgvector", "pinecone", "milvus", "weaviate"])
     migrate_cmd.add_argument("--index-url", help="optional Qdrant URL (otherwise --index is used)")
     migrate_cmd.add_argument("--collection", default="embedflow")
     migrate_cmd.add_argument("--vector-name", help="Qdrant named-vector key, when the collection uses named vectors")
-    migrate_cmd.add_argument("--api-key-env", default="QDRANT_API_KEY", help="environment variable containing the Qdrant or Pinecone API key")
+    migrate_cmd.add_argument("--api-key-env", default="QDRANT_API_KEY", help="environment variable containing the Qdrant/Pinecone/Weaviate API key")
     migrate_cmd.add_argument("--dsn-env", default="EMBEDFLOW_PGVECTOR_DSN", help="pgvector DSN environment variable")
     migrate_cmd.add_argument("--schema", default="public", help="pgvector schema")
     migrate_cmd.add_argument("--table", default="documents", help="pgvector table")
@@ -1271,6 +1337,7 @@ def build_parser() -> argparse.ArgumentParser:
     migrate_cmd.add_argument("--namespace", default="", help="Pinecone namespace")
     migrate_cmd.add_argument("--text-metadata-field", help="Pinecone metadata field containing document text")
     migrate_cmd.add_argument("--milvus-uri", dest="milvus_uri", help="Milvus URI (defaults to --index when it is a URI)")
+    migrate_cmd.add_argument("--weaviate-uri", dest="weaviate_uri", help="Weaviate URI (defaults to --index when it is a URI)")
     migrate_cmd.add_argument("--token-env", default="EMBEDFLOW_MILVUS_TOKEN", help="Milvus token environment variable")
     migrate_cmd.add_argument("--database", default="default", help="Milvus database")
     migrate_cmd.add_argument("--id-field", default="id", help="Milvus primary-key field")
@@ -1278,6 +1345,14 @@ def build_parser() -> argparse.ArgumentParser:
     migrate_cmd.add_argument("--milvus-text-field", default="content", help="Milvus text field")
     migrate_cmd.add_argument("--partition-names", action="append", default=[], help="Milvus partition to search (repeatable)")
     migrate_cmd.add_argument("--auto-load", action="store_true", help="explicitly load a Milvus collection when it is not loaded")
+    migrate_cmd.add_argument("--http-host", default="localhost", help="Weaviate HTTP host")
+    migrate_cmd.add_argument("--http-port", type=int, default=8080, help="Weaviate HTTP port")
+    migrate_cmd.add_argument("--grpc-host", help="Weaviate gRPC host")
+    migrate_cmd.add_argument("--grpc-port", type=int, default=50051, help="Weaviate gRPC port")
+    migrate_cmd.add_argument("--secure", action="store_true", help="use TLS for Weaviate HTTP")
+    migrate_cmd.add_argument("--grpc-secure", action="store_true", help="use TLS for Weaviate gRPC")
+    migrate_cmd.add_argument("--tenant", help="Weaviate tenant")
+    migrate_cmd.add_argument("--text-property", help="Weaviate property containing document text")
     migrate_cmd.add_argument("--metric", choices=["cosine", "dot", "inner_product", "l2", "euclidean"], default="cosine")
     migrate_cmd.add_argument("--model-root", help="directory containing staged research model snapshots")
     migrate_cmd.add_argument("--config", default="./embedflow.yaml", help="where to save the generated migration config")
@@ -1299,13 +1374,13 @@ def build_parser() -> argparse.ArgumentParser:
     analyze = sub.add_parser("analyze", help="run the no-target-index finite-tail/T2-v1 diagnostic")
     analyze.add_argument("--config", help="existing EmbedFlow YAML config")
     analyze.add_argument("--documents", help="JSONL document store for direct analysis")
-    analyze.add_argument("--index", help="existing FAISS/Numpy index, Qdrant endpoint, pgvector DSN, or Pinecone host")
+    analyze.add_argument("--index", help="existing FAISS/Numpy index, Qdrant endpoint, pgvector DSN, Pinecone host, Milvus URI, or Weaviate URI")
     analyze.add_argument("--index-ids", help="optional FAISS ID sidecar path (defaults to <index>.ids.json)")
-    analyze.add_argument("--backend", choices=["faiss", "qdrant", "pgvector", "pinecone", "milvus"], default=None)
+    analyze.add_argument("--backend", choices=["faiss", "qdrant", "pgvector", "pinecone", "milvus", "weaviate"], default=None)
     analyze.add_argument("--metric", choices=["cosine", "dot", "inner_product", "l2", "euclidean"], default="cosine")
     analyze.add_argument("--collection", default="embedflow", help="Qdrant collection for direct analysis")
     analyze.add_argument("--vector-name", help="Qdrant named-vector key")
-    analyze.add_argument("--api-key-env", default="QDRANT_API_KEY", help="Qdrant or Pinecone API-key environment variable")
+    analyze.add_argument("--api-key-env", default="QDRANT_API_KEY", help="Qdrant, Pinecone, or Weaviate API-key environment variable")
     analyze.add_argument("--dsn-env", default="EMBEDFLOW_PGVECTOR_DSN", help="pgvector DSN environment variable")
     analyze.add_argument("--schema", default="public", help="pgvector schema")
     analyze.add_argument("--table", default="documents", help="pgvector table")
@@ -1319,6 +1394,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--namespace", default="", help="Pinecone namespace")
     analyze.add_argument("--text-metadata-field", help="Pinecone metadata field containing document text")
     analyze.add_argument("--milvus-uri", dest="milvus_uri", help="Milvus URI")
+    analyze.add_argument("--weaviate-uri", dest="weaviate_uri", help="Weaviate URI")
     analyze.add_argument("--token-env", default="EMBEDFLOW_MILVUS_TOKEN", help="Milvus token environment variable")
     analyze.add_argument("--database", default="default", help="Milvus database")
     analyze.add_argument("--id-field", default="id", help="Milvus primary-key field")
@@ -1326,6 +1402,14 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--milvus-text-field", default="content", help="Milvus text field")
     analyze.add_argument("--partition-names", action="append", default=[], help="Milvus partition to search (repeatable)")
     analyze.add_argument("--auto-load", action="store_true", help="explicitly load a Milvus collection when it is not loaded")
+    analyze.add_argument("--http-host", default="localhost", help="Weaviate HTTP host")
+    analyze.add_argument("--http-port", type=int, default=8080, help="Weaviate HTTP port")
+    analyze.add_argument("--grpc-host", help="Weaviate gRPC host")
+    analyze.add_argument("--grpc-port", type=int, default=50051, help="Weaviate gRPC port")
+    analyze.add_argument("--secure", action="store_true", help="use TLS for Weaviate HTTP")
+    analyze.add_argument("--grpc-secure", action="store_true", help="use TLS for Weaviate gRPC")
+    analyze.add_argument("--tenant", help="Weaviate tenant")
+    analyze.add_argument("--text-property", help="Weaviate property containing document text")
     analyze.add_argument("--source-model", help="legacy/source model ID or local path")
     analyze.add_argument("--target-model", help="desired target model ID or local path")
     analyze.add_argument("--model-root", help="directory containing staged model snapshots")

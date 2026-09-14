@@ -89,6 +89,9 @@ def _load_index(path: str | Path, backend: str, metric: str, documents: dict[str
     if backend == "milvus":
         from ..indexes import MilvusIndex
         return MilvusIndex.connect(str(path), collection="documents", dimension=dimension, documents=documents, metric=metric)
+    if backend == "weaviate":
+        from ..indexes import WeaviateIndex
+        return WeaviateIndex.connect(uri=str(path), collection="Documents", dimension=dimension, documents=documents, metric=metric)
     raise ValueError(f"unsupported index backend: {backend}")
 
 

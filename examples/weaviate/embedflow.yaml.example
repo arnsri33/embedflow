@@ -1,0 +1,22 @@
+source:
+  model: embedflow/demo-source
+  dimension: 64
+target:
+  model: embedflow/demo-target
+  dimension: 64
+index:
+  backend: weaviate
+  uri: http://127.0.0.1:8080
+  collection: Documents
+  vector_name: default
+  text_property: content
+  metric: cosine
+  api_key_env: WEAVIATE_API_KEY
+documents:
+  path: ./documents.jsonl
+migration:
+  candidate_depth: 10
+  kmax_probe: 50
+cache:
+  path: ./runtime/cache
+state_path: ./runtime/state.json

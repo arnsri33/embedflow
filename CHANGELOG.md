@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.5.0 — Weaviate backend
+
+- Added a read-only Weaviate v4 backend for existing externally-vectorized
+  dense collections, including named-vector selection and UUID IDs.
+- Added HTTP/gRPC connection settings, property-backed or external text
+  resolution, metric normalization, collection auditing, and safe client
+  shutdown.
+- Added the optional `weaviate-client` extra, Docker fixture, example, and
+  live 10,000-object validation harness.
+
 ## v0.4.0 — Milvus backend
 
 - Added a read-only Milvus backend for existing dense `FLOAT_VECTOR`

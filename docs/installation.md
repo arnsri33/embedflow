@@ -33,6 +33,7 @@ python -m pip install -e .
 | `pgvector` | Psycopg 3 binary driver and pgvector adapter |
 | `pinecone` | Official Pinecone Python SDK and adapter |
 | `milvus` | Official pymilvus SDK and adapter |
+| `weaviate` | Official Weaviate Python v4 SDK and adapter |
 | `models` | PyTorch, Transformers, Sentence Transformers, and Hub client |
 | `dashboard` | FastAPI, Uvicorn, and Pydantic |
 | `dev` | Pytest, Ruff, and build tooling |
@@ -72,6 +73,12 @@ index host; see [`integrations/pinecone.md`](integrations/pinecone.md).
 Install the optional adapter with `python -m pip install "embedflow[milvus]"`.
 Configure an existing collection URI, database, and vector field; see
 [`integrations/milvus.md`](integrations/milvus.md).
+
+## Weaviate
+
+Install the current v4 client with `python -m pip install "embedflow[weaviate]"`.
+Configure an existing externally-vectorized collection, including both the
+HTTP and gRPC endpoints; see [`integrations/weaviate.md`](integrations/weaviate.md).
 
 ## CPU and GPU
 

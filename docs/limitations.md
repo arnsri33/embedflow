@@ -1,6 +1,6 @@
 # Limitations and release scope
 
-EmbedFlow v0.4.0 is an alpha release for research and early real-world
+EmbedFlow v0.5.0 is an alpha release for research and early real-world
 testing. The serving path is designed to make migration experiments concrete;
 production rollout still requires application-specific validation.
 

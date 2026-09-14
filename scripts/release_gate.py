@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the EmbedFlow v0.4.0 release gate without publishing anything.
+"""Run the EmbedFlow v0.5.0 release gate without publishing anything.
 
 The gate deliberately records unavailable optional interpreters/dependencies as
 expected skips, while failing on code, registry, packaging, documentation, or
@@ -364,6 +364,23 @@ def main() -> int:
                 "Milvus Docker integration was skipped",
             )
 
+    weaviate_result = run_check(
+        "Weaviate Docker integration",
+        [sys.executable, "-m", "pytest", "-q", "tests/test_weaviate_docker.py"],
+        env=python_env(),
+        timeout=1_200,
+    )
+    if weaviate_result and weaviate_result.returncode == 0:
+        weaviate_output = (weaviate_result.stdout or "") + (weaviate_result.stderr or "")
+        if re.search(r"\b\d+ skipped\b", weaviate_output) and not re.search(r"\b\d+ passed\b", weaviate_output):
+            CHECKS[-1].status = "SKIP"
+            CHECKS[-1].detail = next(
+                (line.strip() for line in weaviate_output.splitlines()
+                 if "Docker unavailable" in line or "set EMBEDFLOW_RUN_WEAVIATE_DOCKER" in line
+                 or "install the optional dependency" in line),
+                "Weaviate Docker integration was skipped",
+            )
+
     ruff = shutil.which("ruff")
     if ruff:
         run_check("ruff", [ruff, "check", "."], env=python_env())
@@ -451,7 +468,7 @@ def main() -> int:
     dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, text=True, capture_output=True).stdout.strip())
     commit_label = f"{commit} (working tree has uncommitted changes)" if dirty else commit
     report_lines = [
-        "# EmbedFlow v0.4.0 Release Test Report", "",
+        "# EmbedFlow v0.5.0 Release Test Report", "",
         f"- Generated: {time.strftime('%Y-%m-%d %H:%M:%S %z')}",
         f"- Python running gate: {sys.version.split()[0]}",
         "- Repository: `embedflow` (local release checkout)",
