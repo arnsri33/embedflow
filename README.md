@@ -156,6 +156,24 @@ embedflow plan --config ./embedflow.yaml --queries ./probe_queries.jsonl --forma
 `SAFE` is an empirical finite-tail signal, not a retrieval-quality guarantee.
 See [`docs/planner.md`](https://github.com/arnsri33/embedflow/blob/main/docs/planner.md).
 
+Observe the reviewed migration path on real traffic without changing the
+source result:
+
+```yaml
+runtime: {mode: shadow}
+shadow: {enabled: true, sample_rate: 0.10, candidate_k: 100, materialize: true}
+```
+
+```bash
+embedflow serve --config ./embedflow.yaml
+embedflow shadow report --config ./embedflow.yaml --since 24h
+```
+
+Shadow Mode is source-authoritative, bounded, and advisory. It records cache,
+coverage, latency, and ranking-disagreement diagnostics; it does not claim
+retrieval-quality preservation without qrels and never routes canary traffic.
+See [`docs/shadow-mode.md`](https://github.com/arnsri33/embedflow/blob/main/docs/shadow-mode.md).
+
 Search responses expose `COLD`, `PARTIAL`, or `WARM`, cache hits and misses,
 synchronous work, queued work, and stage timings. Once the candidate vectors
 are warm, target scoring over that candidate set is deterministic.
@@ -263,13 +281,14 @@ OpenAPI documentation; see
 - [CLI reference](https://github.com/arnsri33/embedflow/blob/main/docs/cli.md)
 - [API](https://github.com/arnsri33/embedflow/blob/main/docs/api.md)
 - [Economics](https://github.com/arnsri33/embedflow/blob/main/docs/economics.md)
+- [Shadow Mode](https://github.com/arnsri33/embedflow/blob/main/docs/shadow-mode.md)
 - [Limitations](https://github.com/arnsri33/embedflow/blob/main/docs/limitations.md)
 - [Contributing](https://github.com/arnsri33/embedflow/blob/main/CONTRIBUTING.md)
 - [Security](https://github.com/arnsri33/embedflow/blob/main/SECURITY.md)
 
 ## Status
 
-EmbedFlow v0.6.0 is a pre-1.0 release for research and early real-world
+EmbedFlow v0.7.0 is a pre-1.0 release for research and early real-world
 testing.
 
 - T2-v1 reports an empirical finite-tail diagnostic.

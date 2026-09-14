@@ -10,6 +10,7 @@ embedflow init --config ./embedflow.yaml
 embedflow analyze --config ./embedflow.yaml --output-dir ./analysis
 embedflow evaluate --config ./experiment.yaml --output-dir ./results
 embedflow plan --config ./embedflow.yaml --queries ./probe_queries.jsonl
+embedflow shadow report --config ./embedflow.yaml --since 24h
 ```
 
 `analyze` is the no-target-index workflow. It uses probe queries and frozen
@@ -41,6 +42,12 @@ embedflow export-target --config ./embedflow.yaml --output-index ./target.index
 materialization throughput. `audit-index` checks the source index against an
 exact/reference configuration where supported. `prewarm` schedules target
 document work; it does not change source-index results.
+
+Use `embedflow serve --mode shadow` to opt into source-authoritative Shadow
+Mode for one process. `embedflow shadow report` reads the bounded telemetry
+store and supports `--format text|json|yaml`, `--since`, `--output`, and
+`--quiet`. A valid `DEFER`/`EXPAND_K` report is still an analytical success;
+only invalid configuration or initialization returns a non-zero exit code.
 
 ## Registry and profiles
 

@@ -173,17 +173,40 @@ class MaterializationWorker:
                 if missing:
                     self.queue.fail(missing, "document text is unavailable")
                     self._stats["errors"] += len(missing)
+                    callback = getattr(self, "on_failed", None)
+                    if callable(callback):
+                        try:
+                            callback(len(missing))
+                        except Exception:
+                            pass
                 if not available:
                     continue
                 vectors = self.target_model.encode_documents(texts, batch_size=self.batch_size)
                 self.cache.put(available, np.asarray(vectors, dtype="float32")); self.queue.complete(available)
                 self._stats["materialized"] += len(available)
+                callback = getattr(self, "on_materialized", None)
+                if callable(callback):
+                    try:
+                        callback(len(available))
+                    except Exception:
+                        # Observability callbacks are never allowed to poison
+                        # the materialization worker or source serving path.
+                        pass
                 elapsed = max(time.time() - float(self._stats["started_at"] or time.time()), 1e-6)
                 self._stats["last_throughput_docs_sec"] = self._stats["materialized"] / elapsed
                 if self.state: self.state.update(materialized_documents=self._stats["materialized"], materializer_throughput_docs_sec=self._stats["last_throughput_docs_sec"], queue=self.queue.stats())
             except Exception as exc:
-                self.queue.fail(ids, repr(exc)); self._stats["errors"] += len(ids)
-                if self.state: self.state.add_error(f"materialization failed for {len(ids)} docs: {exc}")
+                # Provider exceptions can accidentally echo private document
+                # text. Keep durable queue/state diagnostics categorical.
+                message = f"{type(exc).__name__} during target materialization"
+                self.queue.fail(ids, message); self._stats["errors"] += len(ids)
+                callback = getattr(self, "on_failed", None)
+                if callable(callback):
+                    try:
+                        callback(len(ids))
+                    except Exception:
+                        pass
+                if self.state: self.state.add_error(f"materialization failed for {len(ids)} docs ({type(exc).__name__})")
 
     def stop(self, timeout: float = 5.0) -> None:
         self.stop_event.set()
@@ -199,4 +222,44 @@ class MaterializationWorker:
             return
         self.stop(timeout=timeout)
         self.queue.close()
+        self._closed = True
+
+
+class ReadOnlyMaterializationWorker:
+    """No-op worker used when Shadow Mode explicitly disables materialization.
+
+    Constructing ``PersistentWorkQueue`` opens/initializes SQLite and resets
+    stale ``processing`` rows.  That is useful for a normal migration worker,
+    but it is an observable mutation for ``shadow.materialize: false``.  This
+    lightweight implementation preserves the worker status/enqueue contract
+    without touching the target cache or materialization queue at all.
+    """
+
+    def __init__(self) -> None:
+        self._closed = False
+        self.on_materialized = None
+        self.on_failed = None
+
+    def enqueue(self, ids: Iterable[str]) -> int:
+        if self._closed:
+            raise RuntimeError("materialization worker is closed")
+        return 0
+
+    def start(self) -> None:
+        if self._closed:
+            raise RuntimeError("materialization worker is closed")
+
+    def stop(self, timeout: float = 5.0) -> None:
+        return None
+
+    def stats(self) -> dict[str, Any]:
+        return {
+            "materialized": 0,
+            "errors": 0,
+            "started_at": None,
+            "last_throughput_docs_sec": 0.0,
+            "queue": {"pending": 0, "processing": 0, "done": 0, "error": 0},
+        }
+
+    def close(self, timeout: float = 5.0) -> None:
         self._closed = True

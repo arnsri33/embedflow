@@ -92,11 +92,12 @@ jobs:
         run: python -m twine check dist/*
       - name: Smoke-test the built wheel
         run: |
+          EXPECTED_VERSION=$(python -c 'import tomllib; from pathlib import Path; print(tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"])')
           python -m venv /tmp/embedflow-release-wheel
           /tmp/embedflow-release-wheel/bin/python -m pip install --upgrade pip
           /tmp/embedflow-release-wheel/bin/python -m pip install dist/*.whl
           cd /tmp
-          /tmp/embedflow-release-wheel/bin/python -c "import embedflow; assert embedflow.__version__ == '0.5.0'; print(embedflow.__version__)"
+          EXPECTED_VERSION="$EXPECTED_VERSION" /tmp/embedflow-release-wheel/bin/python -c "import os, embedflow; expected=os.environ['EXPECTED_VERSION']; assert embedflow.__version__ == expected, (embedflow.__version__, expected); print(embedflow.__version__)"
           /tmp/embedflow-release-wheel/bin/embedflow --help
           /tmp/embedflow-release-wheel/bin/embedflow registry list
       - name: Store distributions

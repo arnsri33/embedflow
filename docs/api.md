@@ -21,6 +21,7 @@ Interactive OpenAPI documentation is available at
 | GET | `/metrics` | Aggregated latency and queue metrics |
 | GET | `/plan` | Current migration plan |
 | GET | `/economics` | Configured economics estimate |
+| GET | `/shadow/report` | Bounded Shadow Mode diagnostics |
 
 ## Search
 
@@ -47,6 +48,13 @@ The response includes the result list and migration fields such as:
 `COLD`, `PARTIAL`, and `WARM` describe target-vector availability for that
 request. A partial response scores the available target vectors; it can differ
 from the fully warm ranking.
+
+When `runtime.mode=shadow`, `/search` returns the source-only result and marks
+`migration.source_authoritative=true`; target work is scheduled in the
+background. `/shadow/report`, `/status`, and `/metrics` expose aggregate shadow
+observations without raw query/document text or vectors. Shadow failures and
+timeouts are isolated from the response. Ranking overlap is diagnostic and is
+not a qrels-based quality claim.
 
 The advisory migration planner is exposed through the Python API and the
 `embedflow plan` CLI. It is intentionally not a synchronous FastAPI endpoint:

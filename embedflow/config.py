@@ -240,6 +240,52 @@ class PlannerConfig:
 
 
 @dataclass
+class RuntimeConfig:
+    """Serving mode selection.
+
+    ``migration`` is the historical source-candidate/target-reranking path.
+    ``shadow`` keeps the source result authoritative and runs the target path
+    off the request's critical path.
+    """
+
+    mode: str = "migration"
+
+
+@dataclass
+class ShadowTelemetryConfig:
+    """Privacy-conscious persistence settings for shadow observations."""
+
+    enabled: bool = True
+    path: str | None = None
+    retain_query_records: bool = False
+    retain_query_text: bool = False
+    max_records: int = 10_000
+    retention_days: int | None = None
+    report_k: int = 10
+    min_target_coverage_for_ranking: float = 1.0
+
+
+@dataclass
+class ShadowConfig:
+    """Bounded, failure-isolated shadow execution settings."""
+
+    # A runtime mode of ``shadow`` is itself an explicit opt-in.  Keeping this
+    # default true means a minimal ``runtime: {mode: shadow}`` configuration
+    # behaves as users expect; ``shadow.enabled: false`` remains an explicit
+    # kill switch.
+    enabled: bool = True
+    sample_rate: float = 0.10
+    sample_seed: int = 42
+    candidate_k: int | None = None
+    materialize: bool = True
+    max_inflight: int = 32
+    queue_capacity: int = 1000
+    timeout_ms: int = 10_000
+    shutdown_grace_ms: int = 1_000
+    telemetry: ShadowTelemetryConfig = field(default_factory=ShadowTelemetryConfig)
+
+
+@dataclass
 class TelemetryConfig:
     latency_log: str = "./logs/latency.jsonl"
 
@@ -260,6 +306,8 @@ class EmbedFlowConfig:
     # Appended after the historical fields so positional construction of
     # existing configurations remains source-compatible.
     planner: PlannerConfig = field(default_factory=PlannerConfig)
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    shadow: ShadowConfig = field(default_factory=ShadowConfig)
 
     def resolve_paths(self, base: Path) -> EmbedFlowConfig:
         """Resolve relative paths against the configuration file directory."""
@@ -290,6 +338,9 @@ class EmbedFlowConfig:
         if self.planner.access_trace:
             p = Path(self.planner.access_trace)
             self.planner.access_trace = str((base / p).resolve()) if not p.is_absolute() else str(p)
+        if self.shadow.telemetry.path:
+            p = Path(self.shadow.telemetry.path)
+            self.shadow.telemetry.path = str((base / p).resolve()) if not p.is_absolute() else str(p)
         return self
 
     def to_dict(self) -> dict[str, Any]:
@@ -309,6 +360,67 @@ class EmbedFlowConfig:
         backend = self.index.backend.lower() if isinstance(self.index.backend, str) else ""
         if backend not in {"faiss", "qdrant", "pgvector", "pinecone", "milvus", "weaviate"}:
             raise ValueError("index.backend must be faiss, qdrant, pgvector, pinecone, milvus, or weaviate")
+        if not isinstance(self.runtime.mode, str) or self.runtime.mode.strip().lower() not in {"migration", "normal", "source", "shadow"}:
+            raise ValueError("runtime.mode must be migration, normal, source, or shadow")
+        self.runtime.mode = self.runtime.mode.strip().lower()
+        if not isinstance(self.shadow.enabled, bool):
+            raise ValueError("shadow.enabled must be a boolean")
+        for label, value in (("shadow.sample_rate", self.shadow.sample_rate),
+                             ("shadow.timeout_ms", self.shadow.timeout_ms),
+                             ("shadow.max_inflight", self.shadow.max_inflight),
+                             ("shadow.queue_capacity", self.shadow.queue_capacity),
+                             ("shadow.shutdown_grace_ms", self.shadow.shutdown_grace_ms)):
+            if label == "shadow.sample_rate":
+                if isinstance(value, bool):
+                    raise ValueError("shadow.sample_rate must be between 0 and 1")
+                try:
+                    parsed = float(value)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise ValueError("shadow.sample_rate must be between 0 and 1") from exc
+                if not math.isfinite(parsed) or not 0.0 <= parsed <= 1.0:
+                    raise ValueError("shadow.sample_rate must be between 0 and 1")
+                self.shadow.sample_rate = parsed
+            else:
+                parsed = _integer(value, label, minimum=1)
+                setattr(self.shadow, label.split(".")[-1], parsed)
+        limits = {"max_inflight": 1024, "queue_capacity": 1_000_000,
+                  "timeout_ms": 3_600_000, "shutdown_grace_ms": 300_000}
+        for field_name, limit in limits.items():
+            if int(getattr(self.shadow, field_name)) > limit:
+                raise ValueError(f"shadow.{field_name} exceeds the safe limit of {limit}")
+        self.shadow.sample_seed = _integer(self.shadow.sample_seed, "shadow.sample_seed")
+        if self.shadow.candidate_k is not None:
+            self.shadow.candidate_k = _integer(self.shadow.candidate_k, "shadow.candidate_k", minimum=1)
+        if self.shadow.candidate_k is not None and self.shadow.candidate_k < 1:
+            raise ValueError("shadow.candidate_k must be positive")
+        if self.shadow.candidate_k is not None:
+            shadow_k = int(self.shadow.candidate_k)
+            backend_limits = {"pinecone": 10_000, "milvus": 16_384, "weaviate": 10_000}
+            limit = backend_limits.get(backend)
+            if limit is not None and shadow_k > limit:
+                raise ValueError(f"{backend} shadow.candidate_k must be <= {limit}")
+        if not isinstance(self.shadow.materialize, bool):
+            raise ValueError("shadow.materialize must be a boolean")
+        telemetry = self.shadow.telemetry
+        if not isinstance(telemetry.enabled, bool):
+            raise ValueError("shadow.telemetry.enabled must be a boolean")
+        for label, value in (("shadow.telemetry.retain_query_records", telemetry.retain_query_records),
+                             ("shadow.telemetry.retain_query_text", telemetry.retain_query_text)):
+            if not isinstance(value, bool):
+                raise ValueError(f"{label} must be a boolean")
+        telemetry.max_records = _integer(telemetry.max_records, "shadow.telemetry.max_records", minimum=1)
+        if telemetry.retention_days is not None:
+            telemetry.retention_days = _integer(telemetry.retention_days, "shadow.telemetry.retention_days", minimum=1)
+        telemetry.report_k = _integer(telemetry.report_k, "shadow.telemetry.report_k", minimum=1)
+        try:
+            coverage = float(telemetry.min_target_coverage_for_ranking)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("shadow.telemetry.min_target_coverage_for_ranking must be between 0 and 1") from exc
+        if not math.isfinite(coverage) or not 0.0 <= coverage <= 1.0:
+            raise ValueError("shadow.telemetry.min_target_coverage_for_ranking must be between 0 and 1")
+        telemetry.min_target_coverage_for_ranking = coverage
+        if telemetry.path is not None and (not isinstance(telemetry.path, str) or not telemetry.path.strip() or "\x00" in telemetry.path):
+            raise ValueError("shadow.telemetry.path must be null or a non-empty path without NUL bytes")
         allowed_metrics = {"cosine", "dot", "inner_product"}
         if backend in {"pgvector", "milvus"}:
             allowed_metrics |= {"l2", "euclidean"}
@@ -536,6 +648,14 @@ def from_dict(raw: dict[str, Any], *, validate: bool = True) -> EmbedFlowConfig:
     source = hydrate_research_contract(_model(raw.get("source", {}), ""))
     target = hydrate_research_contract(_model(raw.get("target", {}), ""))
     migration_raw = dict(raw.get("migration", {}))
+    runtime_raw = dict(raw.get("runtime", {}))
+    shadow_raw = dict(raw.get("shadow", {}))
+    shadow_telemetry_raw = shadow_raw.get("telemetry", {})
+    if shadow_telemetry_raw is None:
+        shadow_telemetry_raw = {}
+    if not isinstance(shadow_telemetry_raw, Mapping):
+        raise ValueError("shadow.telemetry must be a YAML object")
+    shadow_raw["telemetry"] = ShadowTelemetryConfig(**dict(shadow_telemetry_raw))
     if isinstance(migration_raw.get("candidate_depth"), str) and migration_raw["candidate_depth"].strip().lower() == "auto":
         migration_raw["candidate_depth"] = "auto"
     index_raw = dict(raw.get("index", {}))
@@ -563,6 +683,8 @@ def from_dict(raw: dict[str, Any], *, validate: bool = True) -> EmbedFlowConfig:
         economics=EconomicsConfig(**dict(raw.get("economics", {}))),
         probe=ProbeConfig(**dict(raw.get("probe", {}))),
         planner=PlannerConfig(**_planner_raw(raw.get("planner", {}))),
+        runtime=RuntimeConfig(**runtime_raw),
+        shadow=ShadowConfig(**shadow_raw),
         telemetry=TelemetryConfig(**dict(raw.get("telemetry", {}))),
         state_path=str(raw.get("state_path", "./embedflow_state.json")),
         dashboard_title=str(raw.get("dashboard_title", EmbedFlowConfig.__dataclass_fields__["dashboard_title"].default)),
@@ -689,6 +811,7 @@ def _apply_environment_overrides(cfg: EmbedFlowConfig) -> None:
     unset variables leave the file untouched.
     """
     paths: dict[str, tuple[Any, str]] = {
+        "EMBEDFLOW_RUNTIME_MODE": (cfg.runtime, "mode"),
         "EMBEDFLOW_SOURCE_MODEL": (cfg.source, "model"),
         "EMBEDFLOW_TARGET_MODEL": (cfg.target, "model"),
         "EMBEDFLOW_SOURCE_DEVICE": (cfg.source, "device"),
@@ -737,11 +860,57 @@ def _apply_environment_overrides(cfg: EmbedFlowConfig) -> None:
         "EMBEDFLOW_PLANNER_ACCESS_TRACE": (cfg.planner, "access_trace"),
         "EMBEDFLOW_PLANNER_CORPUS_NAME": (cfg.planner, "corpus_name"),
         "EMBEDFLOW_PLANNER_CORPUS_FINGERPRINT": (cfg.planner, "corpus_fingerprint"),
+        "EMBEDFLOW_SHADOW_TELEMETRY_PATH": (cfg.shadow.telemetry, "path"),
     }
     for variable, (target, field_name) in paths.items():
         value = os.environ.get(variable)
         if value is not None and value.strip():
             setattr(target, field_name, value.strip())
+    for variable, target, field_name in (
+        ("EMBEDFLOW_SHADOW_ENABLED", cfg.shadow, "enabled"),
+        ("EMBEDFLOW_SHADOW_MATERIALIZE", cfg.shadow, "materialize"),
+        ("EMBEDFLOW_SHADOW_TELEMETRY_ENABLED", cfg.shadow.telemetry, "enabled"),
+        ("EMBEDFLOW_SHADOW_RETAIN_QUERY_RECORDS", cfg.shadow.telemetry, "retain_query_records"),
+        ("EMBEDFLOW_SHADOW_RETAIN_QUERY_TEXT", cfg.shadow.telemetry, "retain_query_text"),
+    ):
+        value = os.environ.get(variable)
+        if value is not None and value.strip():
+            normalized = value.strip().lower()
+            if normalized not in {"0", "1", "true", "false", "yes", "no"}:
+                raise ValueError(f"{variable} must be true or false")
+            setattr(target, field_name, normalized in {"1", "true", "yes"})
+    shadow_ints = (
+        ("EMBEDFLOW_SHADOW_SAMPLE_SEED", cfg.shadow, "sample_seed"),
+        ("EMBEDFLOW_SHADOW_CANDIDATE_K", cfg.shadow, "candidate_k"),
+        ("EMBEDFLOW_SHADOW_MAX_INFLIGHT", cfg.shadow, "max_inflight"),
+        ("EMBEDFLOW_SHADOW_QUEUE_CAPACITY", cfg.shadow, "queue_capacity"),
+        ("EMBEDFLOW_SHADOW_TIMEOUT_MS", cfg.shadow, "timeout_ms"),
+        ("EMBEDFLOW_SHADOW_SHUTDOWN_GRACE_MS", cfg.shadow, "shutdown_grace_ms"),
+        ("EMBEDFLOW_SHADOW_MAX_RECORDS", cfg.shadow.telemetry, "max_records"),
+        ("EMBEDFLOW_SHADOW_REPORT_K", cfg.shadow.telemetry, "report_k"),
+        ("EMBEDFLOW_SHADOW_RETENTION_DAYS", cfg.shadow.telemetry, "retention_days"),
+    )
+    for variable, target, field_name in shadow_ints:
+        value = os.environ.get(variable)
+        if value is not None and value.strip():
+            try:
+                parsed = int(value)
+                if float(value) != parsed:
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"{variable} must be an integer") from exc
+            setattr(target, field_name, parsed)
+    shadow_floats = (
+        ("EMBEDFLOW_SHADOW_SAMPLE_RATE", cfg.shadow, "sample_rate"),
+        ("EMBEDFLOW_SHADOW_MIN_TARGET_COVERAGE", cfg.shadow.telemetry, "min_target_coverage_for_ranking"),
+    )
+    for variable, target, field_name in shadow_floats:
+        value = os.environ.get(variable)
+        if value is not None and value.strip():
+            try:
+                setattr(target, field_name, float(value))
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"{variable} must be a finite number") from exc
     for variable, field_name in (("EMBEDFLOW_WEAVIATE_SECURE", "secure"),
                                  ("EMBEDFLOW_WEAVIATE_GRPC_SECURE", "grpc_secure")):
         value = os.environ.get(variable)

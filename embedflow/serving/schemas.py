@@ -15,6 +15,7 @@ except ImportError:  # pragma: no cover - imported only when API extras are used
 
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1)
+    request_id: str | None = None
     top_k: int = Field(default=10, ge=1, le=100)
     candidate_depth: int | None = Field(default=None, ge=1)
     max_sync_misses: int | None = Field(default=None, ge=0)

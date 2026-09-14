@@ -141,6 +141,29 @@ class SQLiteVectorCache(TargetVectorCache):
             self._db.commit()
             return values
 
+    def peek(self, document_ids: list[str]) -> dict[str, np.ndarray]:
+        """Read cached vectors without changing hit/miss telemetry.
+
+        Shadow analysis with ``materialize=false`` must not make ordinary
+        serving cache statistics look like migration traffic.  This method is
+        intentionally a read-only fast path; callers that need accounting
+        should continue to use :meth:`get`.
+        """
+        ids = [str(x) for x in document_ids]
+        if not ids:
+            return {}
+        with self._lock:
+            self._ensure_open()
+            rows: list[tuple[Any, ...]] = []
+            for start in range(0, len(ids), self._LOOKUP_BATCH_SIZE):
+                chunk = ids[start:start + self._LOOKUP_BATCH_SIZE]
+                placeholders = ",".join("?" for _ in chunk)
+                rows.extend(self._db.execute(
+                    f"SELECT document_id,model_fingerprint,dimension,dtype,vector,checksum,created_at,accessed_at "
+                    f"FROM target_vectors WHERE model_fingerprint=? AND document_id IN ({placeholders})",
+                    [self.model_fingerprint, *chunk]).fetchall())
+            return {str(row[0]): self._decode(row) for row in rows}
+
     def put(self, document_ids: list[str], vectors: np.ndarray) -> None:
         ids = [str(x) for x in document_ids]
         values = np.asarray(vectors, dtype=self.dtype)

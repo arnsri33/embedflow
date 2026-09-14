@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the EmbedFlow v0.6.0 release gate without publishing anything.
+"""Run the EmbedFlow v0.7.0 release gate without publishing anything.
 
 The gate deliberately records unavailable optional interpreters/dependencies as
 expected skips, while failing on code, registry, packaging, documentation, or
@@ -210,11 +210,16 @@ def fresh_wheel_smoke(wheel: Path) -> tuple[bool, str]:
             # version. Force-install the artifact so the console script and
             # package files being tested always come from this wheel rather
             # than being silently satisfied by the host environment.
-            install = subprocess.run([str(py), "-m", "pip", "install", "--no-deps", "--force-reinstall", str(wheel)], cwd=root, text=True, capture_output=True, timeout=180)
+            isolated_env = os.environ.copy()
+            isolated_env["PYTHONPATH"] = ""
+            isolated_env["PYTHONNOUSERSITE"] = "1"
+            install = subprocess.run([str(py), "-m", "pip", "install", "--no-deps", "--force-reinstall", str(wheel)],
+                                     cwd=root, env=isolated_env, text=True, capture_output=True, timeout=180)
             if install.returncode:
                 return False, install.stdout + install.stderr
             for command in (["embedflow", "--help"], ["embedflow", "doctor", "--json"], ["embedflow", "registry", "verify"], ["embedflow", "demo", "--path", str(root / "demo"), "--no-serve"]):
-                result = subprocess.run([str(scripts / command[0]), *command[1:]], cwd=root, text=True, capture_output=True, timeout=180)
+                result = subprocess.run([str(scripts / command[0]), *command[1:]], cwd=root, env=isolated_env,
+                                        text=True, capture_output=True, timeout=180)
                 if result.returncode:
                     return False, (result.stdout or "") + (result.stderr or "")
             return True, "installed wheel and ran help, doctor, registry verify, and demo"
@@ -254,6 +259,13 @@ def run_examples() -> None:
         ]
         for name, command in cli_commands:
             run_check(name, command, cwd=faiss, env=python_env(), timeout=300)
+        run_check(
+            "Shadow Mode offline demo",
+            [sys.executable, str(ROOT / "examples" / "shadow" / "run_demo.py"), "--path", str(work / "shadow")],
+            cwd=ROOT,
+            env=python_env(),
+            timeout=300,
+        )
         if importlib_available("qdrant_client"):
             run_check(
                 "CLI Qdrant demo",
@@ -469,7 +481,7 @@ def main() -> int:
     dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, text=True, capture_output=True).stdout.strip())
     commit_label = f"{commit} (working tree has uncommitted changes)" if dirty else commit
     report_lines = [
-        "# EmbedFlow v0.6.0 Release Test Report", "",
+        "# EmbedFlow v0.7.0 Release Test Report", "",
         f"- Generated: {time.strftime('%Y-%m-%d %H:%M:%S %z')}",
         f"- Python running gate: {sys.version.split()[0]}",
         "- Repository: `embedflow` (local release checkout)",

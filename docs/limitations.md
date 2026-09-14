@@ -1,6 +1,6 @@
 # Limitations and release scope
 
-EmbedFlow v0.6.0 is a pre-1.0 release for research and early real-world
+EmbedFlow v0.7.0 is a pre-1.0 release for research and early real-world
 testing. The serving path is designed to make migration experiments concrete;
 production rollout still requires application-specific validation.
 

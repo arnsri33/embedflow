@@ -41,9 +41,9 @@ async function jsonFetch(url, options){
 async function refresh(){
   try{
     const s=await jsonFetch('/status');
-    const m=s.migration||{},i=s.index||{},c=s.cache||{},w=s.worker||{},l=s.latency||{};
+    const m=s.migration||{},i=s.index||{},c=s.cache||{},w=s.worker||{},l=s.latency||{},sh=s.shadow||{};
     document.querySelector('#status').className='card';
-    document.querySelector('#status').innerHTML=`<div class="grid"><div><div class="label">Source</div><div class="value"><code>${esc(m.source_model||'configured')}</code></div></div><div><div class="label">Target</div><div class="value"><code>${esc(m.target_model||'configured')}</code></div></div><div><div class="label">Backend</div><div class="value"><code>${esc(i.backend||'configured')}</code></div></div><div><div class="label">Diagnostic</div><div class="value">${esc(m.diagnostic)}</div></div><div><div class="label">Candidate depth</div><div class="value">K=${fmt(m.candidate_depth)}</div></div><div><div class="label">Cache progress</div><div class="value">${fmt(c.cached_target_vectors)} / ${fmt(m.corpus_size)} (${fmt(100*(m.cache_fraction||0))}%)</div></div><div><div class="label">Background throughput</div><div class="value">${fmt(w.last_throughput_docs_sec)} docs/s</div></div><div><div class="label">Query p50/p95</div><div class="value">${fmt(l.p50_ms)} / ${fmt(l.p95_ms)} ms</div></div></div><p>Status: <b>${esc(m.status)}</b> · ANN: <b>${esc(m.ann_status)}</b></p>`;
+    document.querySelector('#status').innerHTML=`<div class="grid"><div><div class="label">Source</div><div class="value"><code>${esc(m.source_model||'configured')}</code></div></div><div><div class="label">Target</div><div class="value"><code>${esc(m.target_model||'configured')}</code></div></div><div><div class="label">Backend</div><div class="value"><code>${esc(i.backend||'configured')}</code></div></div><div><div class="label">Mode</div><div class="value">${esc((s.runtime||{}).mode||'migration')}</div></div><div><div class="label">Diagnostic</div><div class="value">${esc(m.diagnostic)}</div></div><div><div class="label">Candidate depth</div><div class="value">K=${fmt(m.candidate_depth)}</div></div><div><div class="label">Cache progress</div><div class="value">${fmt(c.cached_target_vectors)} / ${fmt(m.corpus_size)} (${fmt(100*(m.cache_fraction||0))}%)</div></div><div><div class="label">Background throughput</div><div class="value">${fmt(w.last_throughput_docs_sec)} docs/s</div></div><div><div class="label">Query p50/p95</div><div class="value">${fmt(l.p50_ms)} / ${fmt(l.p95_ms)} ms</div></div></div><p>Status: <b>${esc(m.status)}</b> · ANN: <b>${esc(m.ann_status)}</b>${(s.runtime||{}).mode==='shadow'?` · Shadow sampled: <b>${fmt((sh.counters||{}).shadow_sampled_total)}</b>`:''}</p>`;
   }catch(error){
     document.querySelector('#status').className='card error';
     document.querySelector('#status').textContent='Unable to load migration status: '+error.message;
@@ -100,6 +100,24 @@ def create_app(engine: Any):
     @app.get("/plan")
     def plan(): return engine.plan.to_dict()
 
+    @app.get("/shadow/report")
+    def shadow_report(since: str | None = None):
+        if not getattr(engine, "shadow_telemetry", None):
+            return {"schema_version": 1, "mode": "shadow", "recommendation": "CONTINUE_SHADOW",
+                    "traffic": {"shadow_sampled_total": 0}, "warnings": ["Shadow Mode is not enabled for this session."]}
+        seconds = None
+        if since:
+            import re
+            match = re.fullmatch(r"(\d+(?:\.\d+)?)([smhdw]?)", str(since).strip().lower())
+            if not match:
+                raise HTTPException(status_code=400, detail="since must be a duration such as 1h or 24h")
+            seconds = float(match.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[match.group(2)]
+        return engine.shadow_telemetry.report(since_seconds=seconds,
+                                              config_fingerprint=engine.shadow_telemetry.config_fingerprint,
+                                              queue=engine._shadow_queue_snapshot(),
+                                              candidate_k=getattr(engine.cfg.shadow, "candidate_k", None),
+                                              sample_rate=engine.shadow_runner.sample_rate)
+
     @app.post("/analyze")
     def analyze():
         """Return the persisted finite-tail decision and deployment plan."""
@@ -115,7 +133,7 @@ def create_app(engine: Any):
     @app.post("/search", response_model=SearchResponse)
     def search(body: SearchRequest):
         try:
-            result = engine.search(body.query, body.top_k, body.candidate_depth, body.max_sync_misses)
+            result = engine.search(body.query, body.top_k, body.candidate_depth, body.max_sync_misses, request_id=body.request_id)
             migration = result.get("migration", {})
             # Keep the detailed nested object and expose the compact fields
             # shown in the public API example at the top level as well.
@@ -159,6 +177,11 @@ def create_app(engine: Any):
             "stages": aggregate_records(engine.records),
             "cache": engine.cache.stats(),
             "queue": engine.worker.stats(),
+            "shadow": (engine.shadow_telemetry.report(config_fingerprint=engine.shadow_telemetry.config_fingerprint,
+                                                       queue=engine._shadow_queue_snapshot(),
+                                                       candidate_k=getattr(engine.cfg.shadow, "candidate_k", None),
+                                                       sample_rate=engine.shadow_runner.sample_rate)
+                       if getattr(engine, "shadow_telemetry", None) and getattr(engine, "shadow_runner", None) else None),
         }
 
     @app.get("/economics")

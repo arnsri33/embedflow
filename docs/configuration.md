@@ -77,8 +77,37 @@ planner:
   corpus_name: null
   corpus_fingerprint: null
 
+# Source-authoritative observation mode.  ``runtime.mode: migration`` (the
+# default) leaves Shadow Mode inactive.  ``mode: shadow`` is an explicit opt-in.
+runtime:
+  mode: migration             # migration, normal, source, or shadow
+
+shadow:
+  enabled: true
+  sample_rate: 0.10
+  sample_seed: 42
+  candidate_k: 100
+  materialize: true
+  max_inflight: 32
+  queue_capacity: 1000
+  timeout_ms: 10000
+  shutdown_grace_ms: 1000
+  telemetry:
+    enabled: true
+    path: ./.embedflow/shadow.sqlite3
+    retain_query_records: false
+    retain_query_text: false
+    max_records: 10000
+    retention_days: null
+    report_k: 10
+    min_target_coverage_for_ranking: 1.0
+
 state_path: ./embedflow_state.json
 ```
+
+Shadow Mode always returns the source-authoritative result before target work
+finishes. See [`shadow-mode.md`](shadow-mode.md) for queue, timeout, privacy,
+materialization, and report semantics.
 
 ## Model contracts
 
@@ -164,6 +193,24 @@ EMBEDFLOW_PLANNER_LATENCY_BUDGET_MS
 EMBEDFLOW_PLANNER_ACCESS_TRACE
 EMBEDFLOW_PLANNER_CORPUS_NAME
 EMBEDFLOW_PLANNER_CORPUS_FINGERPRINT
+EMBEDFLOW_RUNTIME_MODE
+EMBEDFLOW_SHADOW_ENABLED
+EMBEDFLOW_SHADOW_SAMPLE_RATE
+EMBEDFLOW_SHADOW_SAMPLE_SEED
+EMBEDFLOW_SHADOW_CANDIDATE_K
+EMBEDFLOW_SHADOW_MATERIALIZE
+EMBEDFLOW_SHADOW_MAX_INFLIGHT
+EMBEDFLOW_SHADOW_QUEUE_CAPACITY
+EMBEDFLOW_SHADOW_TIMEOUT_MS
+EMBEDFLOW_SHADOW_SHUTDOWN_GRACE_MS
+EMBEDFLOW_SHADOW_TELEMETRY_ENABLED
+EMBEDFLOW_SHADOW_TELEMETRY_PATH
+EMBEDFLOW_SHADOW_RETAIN_QUERY_RECORDS
+EMBEDFLOW_SHADOW_RETAIN_QUERY_TEXT
+EMBEDFLOW_SHADOW_MAX_RECORDS
+EMBEDFLOW_SHADOW_REPORT_K
+EMBEDFLOW_SHADOW_RETENTION_DAYS
+EMBEDFLOW_SHADOW_MIN_TARGET_COVERAGE
 ```
 
 ## Input files

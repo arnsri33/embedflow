@@ -24,6 +24,9 @@ from ..config import (
     IndexConfig,
     MigrationConfig,
     ModelConfig,
+    RuntimeConfig,
+    ShadowConfig,
+    ShadowTelemetryConfig,
     hydrate_research_contract,
     save_config,
 )
@@ -41,7 +44,7 @@ from ..indexes.base import VectorIndex
 from ..migration.compatibility import run_probe, save_probe
 from ..migration.state import DocumentStore
 from ..models import EmbeddingModel, load_embedding_model
-from ..runtime import load_index
+from ..runtime import _UnavailableTargetModel, load_index
 from ..serving.engine import MigrationEngine
 
 _MODEL_REGISTRY = {
@@ -157,14 +160,24 @@ class MigrationSession:
         return self.engine.plan
 
     def search(self, query: str, top_k: int = 10, candidate_depth: int | None = None,
-               max_sync_misses: int | None = None) -> dict[str, Any]:
-        return self.engine.search(query, top_k, candidate_depth, max_sync_misses)
+               max_sync_misses: int | None = None, *, request_id: str | None = None) -> dict[str, Any]:
+        return self.engine.search(query, top_k, candidate_depth, max_sync_misses, request_id=request_id)
 
     def status(self) -> dict[str, Any]:
         return self.engine.status()
 
     def prewarm(self, document_ids: list[str], asynchronous: bool = True) -> dict[str, Any]:
         return self.engine.prewarm(document_ids, asynchronous=asynchronous)
+
+    def shadow_report(self, since_seconds: float | None = None) -> dict[str, Any]:
+        if self.engine.shadow_telemetry is None or self.engine.shadow_runner is None:
+            return {"schema_version": 1, "mode": "shadow", "recommendation": "CONTINUE_SHADOW",
+                    "traffic": {"shadow_sampled_total": 0}, "warnings": ["Shadow Mode is not enabled for this session."]}
+        return self.engine.shadow_telemetry.report(since_seconds=since_seconds,
+                                                   config_fingerprint=self.engine.shadow_telemetry.config_fingerprint,
+                                                   queue=self.engine._shadow_queue_snapshot(),
+                                                   candidate_k=getattr(self.config.shadow, "candidate_k", None),
+                                                   sample_rate=self.engine.shadow_runner.sample_rate)
 
     def app(self):
         from ..serving.api import create_app
@@ -248,6 +261,16 @@ def migrate(
     probe_queries: str | Path | Iterable[tuple[str, str]] | None = None,
     probe_limit: int | None = None,
     start_worker: bool = True,
+    mode: str = "migration",
+    shadow_enabled: bool = False,
+    shadow_sample_rate: float = 0.10,
+    shadow_sample_seed: int = 42,
+    shadow_candidate_k: int | None = None,
+    shadow_materialize: bool = True,
+    shadow_max_inflight: int = 32,
+    shadow_queue_capacity: int = 1000,
+    shadow_timeout_ms: int = 10_000,
+    shadow_telemetry_path: str | Path | None = None,
 ) -> MigrationSession:
     """Start progressive migration over an existing index.
 
@@ -269,6 +292,8 @@ def migrate(
     source_cfg = _model_config(old_model, model_root)
     target_cfg = _model_config(new_model, model_root)
     selected_device = device or target_cfg.device or source_cfg.device or "cpu"
+    requested_mode = str(mode).strip().lower()
+    effective_mode = "shadow" if shadow_enabled and requested_mode in {"migration", "normal", "source"} else requested_mode
 
     owns_source = not _is_model(old_model)
     owns_target = not _is_model(new_model)
@@ -280,7 +305,16 @@ def migrate(
     engine = None
     try:
         source_model = old_model if not owns_source else load_embedding_model(source_cfg, model_root=model_root, device=selected_device)
-        target_model = new_model if not owns_target else load_embedding_model(target_cfg, model_root=model_root, device=selected_device)
+        try:
+            target_model = new_model if not owns_target else load_embedding_model(target_cfg, model_root=model_root, device=selected_device)
+        except Exception:
+            # The public facade is also a serving entry point.  In explicit
+            # source/Shadow modes, an unavailable target must become an
+            # isolated observation rather than preventing the source index
+            # from opening.  Normal migration remains fail-fast.
+            if effective_mode not in {"source", "shadow"}:
+                raise
+            target_model = _UnavailableTargetModel(target_cfg, int(source_model.dimension))
         source_cfg.dimension = int(source_model.dimension)
         target_cfg.dimension = int(target_model.dimension)
 
@@ -359,6 +393,18 @@ def migrate(
             cache=CacheConfig(path=str(cache_path)),
             state_path=str(state_path),
             dashboard_title=f"EmbedFlow — {source_cfg.model} → {target_cfg.model}",
+            runtime=RuntimeConfig(mode=effective_mode),
+            shadow=ShadowConfig(
+                # ``--mode shadow`` is an explicit opt-in on its own; the
+                # separate flag remains useful to disable/enable the feature
+                # from programmatic callers that keep the historical mode.
+                enabled=bool(shadow_enabled or str(mode).strip().lower() == "shadow"),
+                sample_rate=float(shadow_sample_rate), sample_seed=int(shadow_sample_seed),
+                candidate_k=shadow_candidate_k, materialize=bool(shadow_materialize),
+                max_inflight=int(shadow_max_inflight), queue_capacity=int(shadow_queue_capacity),
+                timeout_ms=int(shadow_timeout_ms),
+                telemetry=ShadowTelemetryConfig(path=str(shadow_telemetry_path) if shadow_telemetry_path else None),
+            ),
         )
         base = Path(config_path).expanduser().resolve().parent if config_path else Path.cwd()
         cfg.resolve_paths(base)

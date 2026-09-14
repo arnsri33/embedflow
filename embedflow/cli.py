@@ -10,6 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import numpy as np
 
@@ -42,6 +43,7 @@ from .registry import (
     verify_registry,
 )
 from .runtime import build_faiss_from_documents, load_documents, open_engine
+from .shadow import ShadowTelemetry, index_identity_from_config, migration_fingerprint, render_shadow_report
 
 
 def _json(value: Any) -> None: print(json.dumps(value, indent=2, ensure_ascii=False, default=float))
@@ -75,19 +77,55 @@ def _normalize_device(value: str | None) -> str | None:
     return "cuda" if value.lower() == "gpu" else value
 
 
+def _safe_endpoint(value: Any) -> str:
+    """Render an endpoint without exposing embedded credentials.
+
+    Backend adapters redact provider exceptions, but the CLI also displays
+    configured endpoints during ``migrate``/``doctor``. A DSN or hosted URI
+    can contain userinfo or token query parameters, so protect those displays
+    even when a caller supplied a one-shot credential-bearing URI.
+    """
+    raw = str(value or "")
+    if not raw:
+        return "configured endpoint"
+    try:
+        parsed = urlsplit(raw)
+        if parsed.scheme and parsed.netloc:
+            host = parsed.hostname or ""
+            if parsed.port is not None:
+                host = f"{host}:{parsed.port}"
+            # A malformed provider shorthand such as ``milvus://token=...``
+            # is not a valid hostname, but it still must not echo the token
+            # merely because URL parsing accepted it as a netloc.
+            netloc = "<redacted>" if "=" in parsed.netloc and not parsed.username else (
+                f"<redacted>@{host}" if parsed.username or parsed.password else host
+            )
+            sensitive = {"api_key", "apikey", "token", "password", "passwd", "secret", "key"}
+            query = [(key, "<redacted>" if key.lower() in sensitive else val)
+                     for key, val in parse_qsl(parsed.query, keep_blank_values=True)]
+            return urlunsplit((parsed.scheme, netloc, parsed.path, urlencode(query), ""))
+    except (ValueError, TypeError):
+        # This helper is only a display guard; malformed endpoints should be
+        # rejected by the backend/config path rather than by formatting.
+        pass
+    import re
+    return re.sub(r"(?i)(api[_-]?key|token|password|passwd|secret)\s*=\s*[^\s,;]+",
+                  r"\1=<redacted>", raw)
+
+
 def _index_display(cfg: EmbedFlowConfig) -> str:
     """Describe an index without echoing pgvector credentials."""
     if cfg.index.backend.lower() == "pgvector":
         connection_source = "explicit DSN" if cfg.index.url or "://" in str(cfg.index.path) else f"DSN via {cfg.index.dsn_env or 'configured environment'}"
         return f"{cfg.index.schema}.{cfg.index.table} ({connection_source})"
     if cfg.index.backend.lower() == "pinecone":
-        endpoint = cfg.index.host or cfg.index.index_name or "configured index"
+        endpoint = _safe_endpoint(cfg.index.host or cfg.index.index_name or "configured index")
         return f"{endpoint} (namespace={cfg.index.namespace or '<default>'})"
     if cfg.index.backend.lower() == "milvus":
-        endpoint = cfg.index.uri or cfg.index.path or "configured endpoint"
+        endpoint = _safe_endpoint(cfg.index.uri or cfg.index.path or "configured endpoint")
         return f"{endpoint} / {cfg.index.database}.{cfg.index.collection}"
     if cfg.index.backend.lower() == "weaviate":
-        endpoint = cfg.index.uri or f"{cfg.index.http_host}:{cfg.index.http_port}"
+        endpoint = _safe_endpoint(cfg.index.uri or f"{cfg.index.http_host}:{cfg.index.http_port}")
         tenant = f", tenant={cfg.index.tenant!r}" if cfg.index.tenant else ""
         return f"{endpoint} / {cfg.index.collection} (vector={cfg.index.vector_name or '<default>'}{tenant})"
     return str(cfg.index.path)
@@ -536,6 +574,14 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             probe_queries=args.probe_queries,
             probe_limit=args.probe_limit,
             start_worker=not args.no_worker,
+            mode=getattr(args, "mode", "migration"),
+            shadow_enabled=bool(getattr(args, "shadow_enabled", False)),
+            shadow_sample_rate=float(getattr(args, "shadow_sample_rate", 0.10)),
+            shadow_candidate_k=getattr(args, "shadow_candidate_k", None),
+            shadow_materialize=not bool(getattr(args, "shadow_no_materialize", False)),
+            shadow_max_inflight=int(getattr(args, "shadow_max_inflight", 32)),
+            shadow_queue_capacity=int(getattr(args, "shadow_queue_capacity", 1000)),
+            shadow_timeout_ms=int(getattr(args, "shadow_timeout_ms", 10_000)),
         )
         print("EmbedFlow migration ready")
         print(f"source: {session.config.source.model}")
@@ -862,8 +908,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 index_exists = bool(config.index.uri or config.index.http_host or config.index.path)
             else:
                 index_exists = bool(config.index.url or "://" in str(qdrant_endpoint) or Path(config.index.path).exists())
+            configured_endpoint = (
+                "configured pgvector table" if pgvector_backend else
+                _safe_endpoint(config.index.host or config.index.index_name or config.index.path) if pinecone_backend else
+                _safe_endpoint(config.index.uri or config.index.path) if milvus_backend else
+                _safe_endpoint(config.index.uri or f"{config.index.http_host}:{config.index.http_port}") if weaviate_backend else
+                _safe_endpoint(config.index.path)
+            )
             checks.append({"name": "index", "ok": index_exists,
-                           "detail": "configured pgvector table" if pgvector_backend else (config.index.host or config.index.index_name or config.index.path if pinecone_backend else config.index.uri or config.index.path if milvus_backend else config.index.uri or f"{config.index.http_host}:{config.index.http_port}" if weaviate_backend else config.index.path)})
+                           "detail": configured_endpoint})
             normalization_ok = not (config.index.metric.lower() == "cosine" and
                                     (config.source.normalization.lower() != "l2" or config.target.normalization.lower() != "l2"))
             checks.append({"name": "normalization", "ok": normalization_ok,
@@ -981,7 +1034,7 @@ def _cuda_detail() -> str:
 
 def cmd_serve(args: argparse.Namespace) -> int:
     device = _normalize_device(args.device)
-    engine = open_engine(args.config, device=device, demo=args.demo, start_worker=True)
+    engine = open_engine(args.config, device=device, demo=args.demo, start_worker=True, mode=getattr(args, "mode", None))
     from .serving.api import create_app
     app = create_app(engine)
     try:
@@ -992,7 +1045,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
-def _with_engine(args: argparse.Namespace): return open_engine(args.config, device=_normalize_device(args.device), demo=args.demo, start_worker=True)
+def _with_engine(args: argparse.Namespace): return open_engine(args.config, device=_normalize_device(args.device), demo=args.demo, start_worker=True,
+                                                               mode=getattr(args, "mode", None))
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -1004,8 +1058,67 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_search(args: argparse.Namespace) -> int:
     engine = _with_engine(args)
-    try: _json(engine.search(args.query, args.top_k))
+    try: _json(engine.search(args.query, args.top_k, request_id=getattr(args, "request_id", None)))
     finally: engine.close()
+    return 0
+
+
+def _shadow_fingerprint(cfg: EmbedFlowConfig) -> str:
+    candidate_k = getattr(cfg.shadow, "candidate_k", None) or cfg.migration.candidate_depth
+    if isinstance(candidate_k, str):
+        candidate_k = 50
+    index_identity = index_identity_from_config(cfg.index)
+    return migration_fingerprint(source_fingerprint=cfg.source.fingerprint,
+                                 target_fingerprint=cfg.target.fingerprint,
+                                 backend=cfg.index.backend, index_identity=index_identity,
+                                 candidate_k=int(candidate_k))
+
+
+def _parse_since(value: str | None) -> float | None:
+    if value is None:
+        return None
+    raw = str(value).strip().lower()
+    if not raw:
+        raise ValueError("--since must not be empty")
+    match = __import__("re").fullmatch(r"(\d+(?:\.\d+)?)([smhdw]?)", raw)
+    if not match:
+        raise ValueError("--since must be a duration such as 1h, 24h, or 7d")
+    amount = float(match.group(1)); unit = match.group(2) or "s"
+    multiplier = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[unit]
+    return amount * multiplier
+
+
+def cmd_shadow_report(args: argparse.Namespace) -> int:
+    """Render persisted Shadow Mode diagnostics without opening models/indexes."""
+    cfg = load_config(args.config)
+    telemetry_cfg = cfg.shadow.telemetry
+    path = telemetry_cfg.path or str(Path(cfg.cache.path) / "shadow.sqlite3")
+    candidate_k = cfg.shadow.candidate_k or (cfg.migration.candidate_depth if cfg.migration.candidate_depth != "auto" else 50)
+    telemetry = ShadowTelemetry(path, config_fingerprint=_shadow_fingerprint(cfg),
+                                enabled=telemetry_cfg.enabled, max_records=telemetry_cfg.max_records,
+                                retain_query_records=telemetry_cfg.retain_query_records,
+                                retain_query_text=telemetry_cfg.retain_query_text,
+                                retention_days=telemetry_cfg.retention_days,
+                                min_target_coverage_for_ranking=telemetry_cfg.min_target_coverage_for_ranking,
+                                source_fingerprint=cfg.source.fingerprint, target_fingerprint=cfg.target.fingerprint,
+                                backend=cfg.index.backend,
+                                index_identity=index_identity_from_config(cfg.index))
+    try:
+        report = telemetry.report(since_seconds=_parse_since(args.since), config_fingerprint=_shadow_fingerprint(cfg),
+                                  candidate_k=int(candidate_k), sample_rate=cfg.shadow.sample_rate)
+        if args.format == "json":
+            rendered = json.dumps(report, indent=2, ensure_ascii=False, sort_keys=False)
+        elif args.format == "yaml":
+            import yaml
+            rendered = yaml.safe_dump(report, sort_keys=False, allow_unicode=True)
+        else:
+            rendered = render_shadow_report(report)
+        if args.output:
+            _atomic_write_text(Path(args.output).expanduser(), rendered)
+        if not args.output or not args.quiet:
+            print(rendered, end="" if rendered.endswith("\n") else "\n")
+    finally:
+        telemetry.close()
     return 0
 
 
@@ -1439,6 +1552,14 @@ def build_parser() -> argparse.ArgumentParser:
     migrate_cmd.add_argument("--probe-limit", type=int)
     migrate_cmd.add_argument("--device", default=None, help="override configured model device (cpu, cuda, or gpu)")
     migrate_cmd.add_argument("--no-worker", action="store_true", help="disable background materialization worker")
+    migrate_cmd.add_argument("--mode", choices=["migration", "normal", "source", "shadow"], default="migration")
+    migrate_cmd.add_argument("--shadow-enabled", action="store_true", help="enable source-authoritative Shadow Mode")
+    migrate_cmd.add_argument("--shadow-sample-rate", type=float, default=0.10)
+    migrate_cmd.add_argument("--shadow-candidate-k", type=int)
+    migrate_cmd.add_argument("--shadow-no-materialize", action="store_true")
+    migrate_cmd.add_argument("--shadow-max-inflight", type=int, default=32)
+    migrate_cmd.add_argument("--shadow-queue-capacity", type=int, default=1000)
+    migrate_cmd.add_argument("--shadow-timeout-ms", type=int, default=10_000)
     migrate_cmd.add_argument("--no-serve", action="store_true", help="validate/write config without starting the API")
     migrate_cmd.add_argument("--host", default="127.0.0.1")
     migrate_cmd.add_argument("--port", type=int, default=8000)
@@ -1539,14 +1660,23 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--demo", action="store_true")
     evaluate.add_argument("--output-dir", default="./results")
     evaluate.set_defaults(func=cmd_evaluate)
-    serve = sub.add_parser("serve", help="start the FastAPI service and dashboard"); serve.add_argument("--config", default="embedflow.yaml"); serve.add_argument("--device", default=None, help="override configured model device (cpu, cuda, or gpu)"); serve.add_argument("--demo", action="store_true"); serve.add_argument("--host", default="127.0.0.1"); serve.add_argument("--port", type=int, default=8000); serve.add_argument("--log-level", default="info"); serve.set_defaults(func=cmd_serve)
+    serve = sub.add_parser("serve", help="start the FastAPI service and dashboard"); serve.add_argument("--config", default="embedflow.yaml"); serve.add_argument("--device", default=None, help="override configured model device (cpu, cuda, or gpu)"); serve.add_argument("--demo", action="store_true"); serve.add_argument("--mode", choices=["migration", "normal", "source", "shadow"], help="override runtime.mode for this process"); serve.add_argument("--host", default="127.0.0.1"); serve.add_argument("--port", type=int, default=8000); serve.add_argument("--log-level", default="info"); serve.set_defaults(func=cmd_serve)
     command_help = {"status": "show migration, cache, queue, and latency status", "search": "search with source retrieval and target reranking", "prewarm": "materialize selected target vectors", "audit-index": "compare ANN results with an exact/reference index"}
     for name, func in (("status", cmd_status), ("search", cmd_search), ("prewarm", cmd_prewarm), ("audit-index", cmd_audit_index)):
-        sp = sub.add_parser(name, help=command_help[name]); sp.add_argument("--config", default="embedflow.yaml"); sp.add_argument("--device", default=None, help="override configured model device (cpu, cuda, or gpu)"); sp.add_argument("--demo", action="store_true"); sp.set_defaults(func=func)
-    sub.choices["search"].add_argument("query"); sub.choices["search"].add_argument("--top-k", type=int, default=10)
+        sp = sub.add_parser(name, help=command_help[name]); sp.add_argument("--config", default="embedflow.yaml"); sp.add_argument("--device", default=None, help="override configured model device (cpu, cuda, or gpu)"); sp.add_argument("--demo", action="store_true"); sp.add_argument("--mode", choices=["migration", "normal", "source", "shadow"], help="override runtime.mode for this process"); sp.set_defaults(func=func)
+    sub.choices["search"].add_argument("query"); sub.choices["search"].add_argument("--top-k", type=int, default=10); sub.choices["search"].add_argument("--request-id")
     pre = sub.choices["prewarm"]; pre.add_argument("--documents", type=int); pre.add_argument("--fraction", type=float, default=.01); pre.add_argument("--ids"); pre.add_argument("--strategy", choices=["random", "popular", "explicit"], default="random"); pre.add_argument("--seed", type=int, default=42); pre.add_argument("--async", dest="async_mode", action="store_true")
     export = sub.add_parser("export-target", help="explicitly materialize all target vectors and build a target index"); export.add_argument("--config", default="embedflow.yaml"); export.add_argument("--output-index", required=True); export.add_argument("--backend", choices=["faiss", "qdrant"], default="faiss"); export.add_argument("--collection", default="embedflow-target"); export.add_argument("--batch-size", type=int, default=32); export.add_argument("--device", default="cpu"); export.add_argument("--demo", action="store_true"); export.set_defaults(func=cmd_export_target)
     audit = sub.choices["audit-index"]; audit.add_argument("--reference-index"); audit.add_argument("--queries"); audit.add_argument("--k", type=int, default=500); audit.add_argument("--limit", type=int)
+    shadow = sub.add_parser("shadow", help="inspect source-authoritative Shadow Mode telemetry")
+    shadow_sub = shadow.add_subparsers(dest="shadow_command", required=True)
+    shadow_report = shadow_sub.add_parser("report", help="render the persisted shadow migration report")
+    shadow_report.add_argument("--config", default="embedflow.yaml")
+    shadow_report.add_argument("--since", help="time window such as 1h, 24h, or 7d")
+    shadow_report.add_argument("--format", choices=["text", "json", "yaml"], default="text")
+    shadow_report.add_argument("--output", help="optional report artifact path")
+    shadow_report.add_argument("--quiet", action="store_true", help="suppress stdout when --output is supplied")
+    shadow_report.set_defaults(func=cmd_shadow_report)
     econ = sub.add_parser("economics", help="project backfill time and cost from supplied throughput"); econ.add_argument("--config"); econ.add_argument("--corpus-size", type=int, default=0); econ.add_argument("--cached-documents", type=int, default=0); econ.add_argument("--target-docs-per-sec", "--docs-per-second", dest="target_docs_per_sec", type=float); econ.add_argument("--gpu-price", type=float); econ.add_argument("--json", action="store_true", help="emit machine-readable JSON"); econ.add_argument("--demo", action="store_true"); econ.set_defaults(func=cmd_economics)
     demo = sub.add_parser("demo", help="run the self-contained offline progressive-migration demo"); demo.add_argument("--path", default="./examples/local_faiss_demo/runtime"); demo.add_argument("--backend", choices=["faiss", "qdrant"], default="faiss"); demo.add_argument("--no-serve", action="store_true"); demo.add_argument("--host", default="127.0.0.1"); demo.add_argument("--port", type=int, default=8000); demo.set_defaults(func=cmd_demo)
     real = sub.add_parser("real-demo", help="small real-model MiniLM -> Qwen3-0.6B demo")

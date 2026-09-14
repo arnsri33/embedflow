@@ -24,6 +24,46 @@ from .models import load_embedding_model
 from .serving.engine import MigrationEngine
 
 
+class _UnavailableTargetModel:
+    """Contract-shaped target sentinel used by source-authoritative modes.
+
+    Loading a target model can fail before a serving engine has been created
+    (missing local snapshot, unavailable provider, or an optional model
+    dependency). Shadow Mode must still be able to return the existing source
+    result in that situation. This object preserves the configured target
+    fingerprint/dimension for cache/report identity while making every target
+    encode fail with a generic, privacy-safe error that the bounded shadow
+    runner records as an observation.
+    """
+
+    def __init__(self, config: Any, fallback_dimension: int) -> None:
+        self.model_id = str(config.model)
+        self.fingerprint = str(config.fingerprint)
+        configured_dimension = getattr(config, "dimension", None)
+        self.dimension = int(configured_dimension or fallback_dimension)
+        self.available = False
+
+    def encode_queries(self, _texts: list[str]):
+        raise RuntimeError("target model is unavailable")
+
+    def encode_documents(self, _texts: list[str], batch_size: int | None = None):
+        del batch_size
+        raise RuntimeError("target model is unavailable")
+
+    def encode_query(self, _text: str):
+        raise RuntimeError("target model is unavailable")
+
+    def encode_document(self, _text: str):
+        raise RuntimeError("target model is unavailable")
+
+    def close(self) -> None:
+        return None
+
+    def metadata(self) -> dict[str, Any]:
+        return {"model_id": self.model_id, "dimension": self.dimension,
+                "fingerprint": self.fingerprint, "available": False}
+
+
 def load_documents(cfg: EmbedFlowConfig, index: Any | None = None) -> DocumentStore | PgVectorDocumentStore | PineconeDocumentStore | MilvusDocumentStore | WeaviateDocumentStore:
     """Load the configured document resolver.
 
@@ -105,7 +145,7 @@ def load_index(cfg: EmbedFlowConfig, documents: DocumentStore | PgVectorDocument
 
 def open_engine(config_path: str | Path, device: str | None = None, demo: bool = False,
                 start_worker: bool = True, documents: DocumentStore | PgVectorDocumentStore | PineconeDocumentStore | MilvusDocumentStore | WeaviateDocumentStore | None = None,
-                allow_empty_index: bool = False) -> MigrationEngine:
+                allow_empty_index: bool = False, mode: str | None = None) -> MigrationEngine:
     """Load models, a source index, cache, and the shared migration engine.
 
     Serving and analysis require at least one source vector.  ``audit-index``
@@ -113,6 +153,14 @@ def open_engine(config_path: str | Path, device: str | None = None, demo: bool =
     audit finding instead of failing during engine setup.
     """
     cfg = load_config(config_path)
+    if mode is not None:
+        if not isinstance(mode, str) or mode.strip().lower() not in {"migration", "normal", "source", "shadow"}:
+            raise ValueError("mode must be migration, normal, source, or shadow")
+        cfg.runtime.mode = mode.strip().lower()
+        if cfg.runtime.mode == "shadow":
+            # An explicit CLI mode is sufficient to opt into Shadow Mode;
+            # users need not duplicate ``shadow.enabled`` in the YAML file.
+            cfg.shadow.enabled = True
     if cfg.index.metric.lower() == "cosine" and (cfg.source.normalization.lower() != "l2" or cfg.target.normalization.lower() != "l2"):
         raise ValueError("cosine index/reranking requires l2-normalized source and target vectors")
     documents_created = documents is None
@@ -141,7 +189,17 @@ def open_engine(config_path: str | Path, device: str | None = None, demo: bool =
         stored_fingerprint = source_index.metadata().get("model_fingerprint")
         if stored_fingerprint and stored_fingerprint != source_model.fingerprint:
             raise ValueError("source model fingerprint does not match the existing index contract")
-        target_model = load_embedding_model(cfg.target, model_root=Path(config_path).parent / "models", device=target_device, demo=demo)
+        try:
+            target_model = load_embedding_model(cfg.target, model_root=Path(config_path).parent / "models", device=target_device, demo=demo)
+        except Exception:
+            # Source-only and Shadow modes are explicitly observation paths:
+            # an unavailable target must be reported by shadow telemetry, not
+            # prevent the source index from serving. Normal migration keeps
+            # the historical fail-fast behavior so a target is never silently
+            # replaced when it would affect user-visible ranking.
+            if str(getattr(cfg.runtime, "mode", "migration")).lower() not in {"source", "shadow"}:
+                raise
+            target_model = _UnavailableTargetModel(cfg.target, int(source_model.dimension))
         if cfg.target.dimension and int(target_model.dimension) != int(cfg.target.dimension):
             raise ValueError(f"target model dimension {target_model.dimension} != configured {cfg.target.dimension}")
         cache = SQLiteVectorCache(cfg.cache.path, target_model.fingerprint, target_model.dimension)

@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.7.0 — Source-authoritative Shadow Mode
+
+- Added bounded, deterministic, source-authoritative Shadow Mode for observing
+  target reranking on sampled traffic without delaying or changing source
+  responses.
+- Added failure/timeout isolation, queue backpressure, optional asynchronous
+  target-cache materialization, target-coverage and ranking diagnostics, and
+  privacy-conscious SQLite telemetry.
+- Added `embedflow shadow report`, API/status integration, documentation, and a
+  deterministic offline demonstration. Shadow reports remain operational
+  diagnostics and do not claim qrel-based retrieval quality.
+
 ## v0.6.0 — Migration planner
 
 - Added an advisory `embedflow plan` command and Python API that combine

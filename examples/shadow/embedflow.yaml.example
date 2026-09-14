@@ -1,0 +1,25 @@
+# Copy into a deployment configuration and adjust the source/index fields.
+source:
+  model: sentence-transformers/all-MiniLM-L6-v2
+target:
+  model: Qwen/Qwen3-Embedding-0.6B
+index:
+  backend: faiss
+  path: ./legacy.index
+documents:
+  path: ./documents.jsonl
+runtime:
+  mode: shadow
+shadow:
+  enabled: true
+  sample_rate: 0.10
+  candidate_k: 100
+  materialize: true
+  max_inflight: 32
+  queue_capacity: 1000
+  timeout_ms: 10000
+  telemetry:
+    enabled: true
+    path: ./.embedflow/shadow.sqlite3
+    retain_query_records: false
+    retain_query_text: false
