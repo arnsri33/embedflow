@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the EmbedFlow v0.5.0 release gate without publishing anything.
+"""Run the EmbedFlow v0.6.0 release gate without publishing anything.
 
 The gate deliberately records unavailable optional interpreters/dependencies as
 expected skips, while failing on code, registry, packaging, documentation, or
@@ -243,6 +243,7 @@ def run_examples() -> None:
             ("CLI registry match", [sys.executable, "-m", "embedflow", "registry", "match", "--config", "embedflow.yaml", "--json"]),
             ("CLI registry verify", [sys.executable, "-m", "embedflow", "registry", "verify", "--json"]),
             ("CLI doctor", [sys.executable, "-m", "embedflow", "doctor", "--config", "embedflow.yaml", "--json"]),
+            ("CLI plan", [sys.executable, "-m", "embedflow", "plan", "--config", "embedflow.yaml", "--queries", "queries.jsonl", "--demo", "--format", "json"]),
             ("CLI search", [sys.executable, "-m", "embedflow", "search", "what explains aurora", "--config", "embedflow.yaml", "--demo", "--top-k", "3"]),
             ("CLI prewarm", [sys.executable, "-m", "embedflow", "prewarm", "--config", "embedflow.yaml", "--demo", "--documents", "3"]),
             ("CLI audit-index", [sys.executable, "-m", "embedflow", "audit-index", "--config", "embedflow.yaml", "--demo", "--reference-index", "legacy.index", "--queries", "queries.jsonl", "--k", "10"]),
@@ -468,7 +469,7 @@ def main() -> int:
     dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, text=True, capture_output=True).stdout.strip())
     commit_label = f"{commit} (working tree has uncommitted changes)" if dirty else commit
     report_lines = [
-        "# EmbedFlow v0.5.0 Release Test Report", "",
+        "# EmbedFlow v0.6.0 Release Test Report", "",
         f"- Generated: {time.strftime('%Y-%m-%d %H:%M:%S %z')}",
         f"- Python running gate: {sys.version.split()[0]}",
         "- Repository: `embedflow` (local release checkout)",

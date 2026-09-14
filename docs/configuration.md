@@ -58,6 +58,25 @@ economics:
   gpu_price_per_hour: null
   target_docs_per_second: null
 
+# Optional advisory planner settings. CLI flags override these values.
+planner:
+  max_probes: 250
+  seed: 42
+  k_grid: [20, 50, 100, 200, 500]
+  max_candidates: null
+  max_target_encodes: null
+  max_sync_misses: null
+  background_batch_size: null
+  gpu_hourly_cost: null
+  target_docs_per_second: null
+  queries_per_second: null
+  daily_queries: null
+  cache_hit_rate: null
+  latency_budget_ms: null
+  access_trace: null
+  corpus_name: null
+  corpus_fingerprint: null
+
 state_path: ./embedflow_state.json
 ```
 
@@ -130,6 +149,21 @@ EMBEDFLOW_CANDIDATE_DEPTH
 EMBEDFLOW_MAX_SYNC_MISSES
 EMBEDFLOW_BACKGROUND_BATCH_SIZE
 EMBEDFLOW_PROBE_KMAX
+EMBEDFLOW_PLANNER_MAX_PROBES
+EMBEDFLOW_PLANNER_SEED
+EMBEDFLOW_PLANNER_MAX_CANDIDATES
+EMBEDFLOW_PLANNER_MAX_TARGET_ENCODINGS
+EMBEDFLOW_PLANNER_MAX_SYNC_MISSES
+EMBEDFLOW_PLANNER_BACKGROUND_BATCH_SIZE
+EMBEDFLOW_PLANNER_GPU_HOURLY_COST
+EMBEDFLOW_PLANNER_TARGET_DOCS_PER_SECOND
+EMBEDFLOW_PLANNER_QPS
+EMBEDFLOW_PLANNER_DAILY_QUERIES
+EMBEDFLOW_PLANNER_CACHE_HIT_RATE
+EMBEDFLOW_PLANNER_LATENCY_BUDGET_MS
+EMBEDFLOW_PLANNER_ACCESS_TRACE
+EMBEDFLOW_PLANNER_CORPUS_NAME
+EMBEDFLOW_PLANNER_CORPUS_FINGERPRINT
 ```
 
 ## Input files

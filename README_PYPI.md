@@ -123,6 +123,21 @@ Selected core records (nDCG@10, `G(50)`):
 See the [registry documentation](https://github.com/arnsri33/embedflow/blob/main/docs/registry.md)
 for matching levels, contract fingerprints, and provenance.
 
+## Advisory migration plans
+
+Use representative query probes to produce a bounded migration recommendation
+before serving:
+
+```bash
+embedflow plan --config ./embedflow.yaml --queries ./probe_queries.jsonl
+embedflow plan --config ./embedflow.yaml --queries ./probe_queries.jsonl --format json --output migration-plan.json
+```
+
+The planner reports preflight, registry evidence, frozen T2-v1 finite-tail
+behavior, candidate K, cache/economics projections, and staged rollout
+guidance. It never routes traffic or mutates the source index; `SAFE` is not a
+qrels-based retrieval-quality guarantee. See the [planner guide](https://github.com/arnsri33/embedflow/blob/main/docs/planner.md).
+
 ## Research
 
 For candidate depth `K`, EmbedFlow measures:
@@ -163,6 +178,7 @@ See the [Weaviate guide](https://github.com/arnsri33/embedflow/blob/main/docs/in
 ```bash
 embedflow --help
 embedflow analyze --help
+embedflow plan --help
 embedflow serve --config ./embedflow.yaml
 embedflow status --config ./embedflow.yaml
 embedflow registry list
@@ -176,7 +192,7 @@ cover the remaining commands and endpoints.
 
 ## Status
 
-EmbedFlow v0.5.0 is an alpha release for research and early real-world
+EmbedFlow v0.6.0 is a pre-1.0 release for research and early real-world
 testing. T2-v1 is an empirical finite-tail diagnostic, partial rankings can
 differ from fully warm target reranking, and ANN fidelity needs a reference
 comparison to audit.

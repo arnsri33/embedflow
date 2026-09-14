@@ -1,8 +1,14 @@
 """EmbedFlow: progressive embedding-model migration for existing indexes."""
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
-from .config import EmbedFlowConfig, load_config
+from .config import EmbedFlowConfig, PlannerConfig, load_config
+
+
+def plan(*args, **kwargs):
+    """Generate an advisory migration plan without changing source traffic."""
+    from .planner import plan_migration
+    return plan_migration(*args, **kwargs)
 
 
 def migrate(*args, **kwargs):
@@ -22,4 +28,4 @@ def analyze_migration(*args, **kwargs):
     return _analyze_migration(*args, **kwargs)
 
 
-__all__ = ["EmbedFlowConfig", "load_config", "migrate", "analyze_migration", "__version__"]
+__all__ = ["EmbedFlowConfig", "PlannerConfig", "load_config", "migrate", "plan", "analyze_migration", "__version__"]

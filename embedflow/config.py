@@ -213,6 +213,33 @@ class ProbeConfig:
 
 
 @dataclass
+class PlannerConfig:
+    """Bounded, reproducible settings for the advisory migration planner.
+
+    Planner settings are deliberately separate from ``MigrationConfig``.  A
+    plan is analysis state and must not silently change serving defaults.
+    Values supplied by the CLI override these defaults for one invocation.
+    """
+
+    max_probes: int = 250
+    seed: int = 42
+    k_grid: list[int] = field(default_factory=lambda: [20, 50, 100, 200, 500])
+    max_candidates: int | None = None
+    max_target_encodes: int | None = None
+    max_sync_misses: int | None = None
+    background_batch_size: int | None = None
+    gpu_hourly_cost: float | None = None
+    target_docs_per_second: float | None = None
+    queries_per_second: float | None = None
+    daily_queries: float | None = None
+    cache_hit_rate: float | None = None
+    latency_budget_ms: float | None = None
+    access_trace: str | None = None
+    corpus_name: str | None = None
+    corpus_fingerprint: str | None = None
+
+
+@dataclass
 class TelemetryConfig:
     latency_log: str = "./logs/latency.jsonl"
 
@@ -230,6 +257,9 @@ class EmbedFlowConfig:
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     state_path: str = "./embedflow_state.json"
     dashboard_title: str = "EmbedFlow — Progressive Embedding Migration"
+    # Appended after the historical fields so positional construction of
+    # existing configurations remains source-compatible.
+    planner: PlannerConfig = field(default_factory=PlannerConfig)
 
     def resolve_paths(self, base: Path) -> EmbedFlowConfig:
         """Resolve relative paths against the configuration file directory."""
@@ -257,6 +287,9 @@ class EmbedFlowConfig:
         if self.index.ids:
             p = Path(self.index.ids)
             self.index.ids = str((base / p).resolve()) if not p.is_absolute() else str(p)
+        if self.planner.access_trace:
+            p = Path(self.planner.access_trace)
+            self.planner.access_trace = str((base / p).resolve()) if not p.is_absolute() else str(p)
         return self
 
     def to_dict(self) -> dict[str, Any]:
@@ -448,6 +481,45 @@ class EmbedFlowConfig:
         self.probe.epsilon = float(self.probe.epsilon)
         if not math.isfinite(self.probe.epsilon) or self.probe.epsilon < 0:
             raise ValueError("probe.epsilon must be finite and non-negative")
+        planner = self.planner
+        planner.max_probes = _integer(planner.max_probes, "planner.max_probes", minimum=1)
+        planner.seed = _integer(planner.seed, "planner.seed")
+        if not isinstance(planner.k_grid, list) or not planner.k_grid:
+            raise ValueError("planner.k_grid must contain at least one positive integer")
+        planner.k_grid = [_integer(k, "planner.k_grid item", minimum=1) for k in planner.k_grid]
+        if len(set(planner.k_grid)) != len(planner.k_grid):
+            raise ValueError("planner.k_grid must not contain duplicates")
+        planner.k_grid = sorted(planner.k_grid)
+        for label, value in (("planner.max_candidates", planner.max_candidates),
+                             ("planner.max_target_encodes", planner.max_target_encodes),
+                             ("planner.max_sync_misses", planner.max_sync_misses),
+                             ("planner.background_batch_size", planner.background_batch_size)):
+            if value is not None:
+                setattr(planner, label.split(".")[-1], _integer(value, label, minimum=0 if label.endswith("max_sync_misses") else 1))
+        for label, value in (("planner.gpu_hourly_cost", planner.gpu_hourly_cost),
+                             ("planner.target_docs_per_second", planner.target_docs_per_second),
+                             ("planner.queries_per_second", planner.queries_per_second),
+                             ("planner.daily_queries", planner.daily_queries),
+                             ("planner.cache_hit_rate", planner.cache_hit_rate),
+                             ("planner.latency_budget_ms", planner.latency_budget_ms)):
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                raise ValueError(f"{label} must be a finite non-negative number")
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"{label} must be a finite non-negative number") from exc
+            if not math.isfinite(parsed) or parsed < 0:
+                raise ValueError(f"{label} must be a finite non-negative number")
+            if label.endswith("cache_hit_rate") and parsed > 1:
+                raise ValueError("planner.cache_hit_rate must be between 0 and 1")
+            setattr(planner, label.split(".")[-1], parsed)
+        for label, value in (("planner.access_trace", planner.access_trace),
+                             ("planner.corpus_name", planner.corpus_name),
+                             ("planner.corpus_fingerprint", planner.corpus_fingerprint)):
+            if value is not None and (not isinstance(value, str) or not value.strip() or "\x00" in value):
+                raise ValueError(f"{label} must be null or a non-empty string without NUL bytes")
 
 
 def _model(raw: dict[str, Any], fallback: str) -> ModelConfig:
@@ -490,6 +562,7 @@ def from_dict(raw: dict[str, Any], *, validate: bool = True) -> EmbedFlowConfig:
         cache=CacheConfig(**dict(raw.get("cache", {}))),
         economics=EconomicsConfig(**dict(raw.get("economics", {}))),
         probe=ProbeConfig(**dict(raw.get("probe", {}))),
+        planner=PlannerConfig(**_planner_raw(raw.get("planner", {}))),
         telemetry=TelemetryConfig(**dict(raw.get("telemetry", {}))),
         state_path=str(raw.get("state_path", "./embedflow_state.json")),
         dashboard_title=str(raw.get("dashboard_title", EmbedFlowConfig.__dataclass_fields__["dashboard_title"].default)),
@@ -497,6 +570,25 @@ def from_dict(raw: dict[str, Any], *, validate: bool = True) -> EmbedFlowConfig:
     if validate:
         cfg.validate()
     return cfg
+
+
+def _planner_raw(raw: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Normalize planner aliases while keeping the public YAML surface small."""
+    if raw is None:
+        value: dict[str, Any] = {}
+    elif isinstance(raw, Mapping):
+        value = dict(raw)
+    else:
+        raise ValueError("planner must be a YAML object")
+    if "gpu_hourly_cost" not in value and "gpu_price_per_hour" in value:
+        value["gpu_hourly_cost"] = value.pop("gpu_price_per_hour")
+    if "queries_per_second" not in value and "qps" in value:
+        value["queries_per_second"] = value.pop("qps")
+    if "target_docs_per_second" not in value and "docs_per_second" in value:
+        value["target_docs_per_second"] = value.pop("docs_per_second")
+    if "max_candidates" not in value and "max_work" in value:
+        value["max_candidates"] = value.pop("max_work")
+    return value
 
 
 def hydrate_research_contract(model: ModelConfig, project_root: Path | None = None) -> ModelConfig:
@@ -642,6 +734,9 @@ def _apply_environment_overrides(cfg: EmbedFlowConfig) -> None:
         "EMBEDFLOW_CACHE_PATH": (cfg.cache, "path"),
         "EMBEDFLOW_STATE_PATH": (cfg, "state_path"),
         "EMBEDFLOW_LATENCY_LOG": (cfg.telemetry, "latency_log"),
+        "EMBEDFLOW_PLANNER_ACCESS_TRACE": (cfg.planner, "access_trace"),
+        "EMBEDFLOW_PLANNER_CORPUS_NAME": (cfg.planner, "corpus_name"),
+        "EMBEDFLOW_PLANNER_CORPUS_FINGERPRINT": (cfg.planner, "corpus_fingerprint"),
     }
     for variable, (target, field_name) in paths.items():
         value = os.environ.get(variable)
@@ -684,6 +779,39 @@ def _apply_environment_overrides(cfg: EmbedFlowConfig) -> None:
             except (TypeError, ValueError, OverflowError) as exc:
                 raise ValueError(f"{variable} must be an integer") from exc
             setattr(target, field_name, parsed)
+    planner_ints = (
+        ("EMBEDFLOW_PLANNER_MAX_PROBES", cfg.planner, "max_probes"),
+        ("EMBEDFLOW_PLANNER_SEED", cfg.planner, "seed"),
+        ("EMBEDFLOW_PLANNER_MAX_CANDIDATES", cfg.planner, "max_candidates"),
+        ("EMBEDFLOW_PLANNER_MAX_TARGET_ENCODINGS", cfg.planner, "max_target_encodes"),
+        ("EMBEDFLOW_PLANNER_MAX_SYNC_MISSES", cfg.planner, "max_sync_misses"),
+        ("EMBEDFLOW_PLANNER_BACKGROUND_BATCH_SIZE", cfg.planner, "background_batch_size"),
+    )
+    for variable, target, field_name in planner_ints:
+        value = os.environ.get(variable)
+        if value is not None and value.strip():
+            try:
+                parsed = int(value)
+                if float(value) != parsed:
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"{variable} must be an integer") from exc
+            setattr(target, field_name, parsed)
+    planner_floats = (
+        ("EMBEDFLOW_PLANNER_GPU_HOURLY_COST", "gpu_hourly_cost"),
+        ("EMBEDFLOW_PLANNER_TARGET_DOCS_PER_SECOND", "target_docs_per_second"),
+        ("EMBEDFLOW_PLANNER_QPS", "queries_per_second"),
+        ("EMBEDFLOW_PLANNER_DAILY_QUERIES", "daily_queries"),
+        ("EMBEDFLOW_PLANNER_CACHE_HIT_RATE", "cache_hit_rate"),
+        ("EMBEDFLOW_PLANNER_LATENCY_BUDGET_MS", "latency_budget_ms"),
+    )
+    for variable, field_name in planner_floats:
+        value = os.environ.get(variable)
+        if value is not None and value.strip():
+            try:
+                setattr(cfg.planner, field_name, float(value))
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"{variable} must be a finite number") from exc
     partitions = os.environ.get("EMBEDFLOW_MILVUS_PARTITION_NAMES") or os.environ.get("EMBEDFLOW_MILVUS_PARTITIONS")
     if partitions is not None and partitions.strip():
         cfg.index.partition_names = [item.strip() for item in partitions.split(",") if item.strip()]

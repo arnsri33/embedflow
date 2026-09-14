@@ -142,6 +142,20 @@ session = embedflow.migrate(
 results = session.search("what causes auroras?", top_k=10)
 ```
 
+## Plan a migration
+
+Build a conservative, evidence-aware recommendation before serving. The
+planner reuses backend preflight, registry matching, and frozen T2-v1; it is
+advisory and never routes traffic or mutates the source index.
+
+```bash
+embedflow plan --config ./embedflow.yaml --queries ./probe_queries.jsonl
+embedflow plan --config ./embedflow.yaml --queries ./probe_queries.jsonl --format json --output migration-plan.json
+```
+
+`SAFE` is an empirical finite-tail signal, not a retrieval-quality guarantee.
+See [`docs/planner.md`](https://github.com/arnsri33/embedflow/blob/main/docs/planner.md).
+
 Search responses expose `COLD`, `PARTIAL`, or `WARM`, cache hits and misses,
 synchronous work, queued work, and stage timings. Once the candidate vectors
 are warm, target scoring over that candidate set is deterministic.
@@ -227,6 +241,7 @@ Backend-specific setup and examples:
 ```bash
 embedflow --help
 embedflow analyze --help
+embedflow plan --help
 embedflow serve --config ./embedflow.yaml
 embedflow status --config ./embedflow.yaml
 embedflow registry list
@@ -254,7 +269,7 @@ OpenAPI documentation; see
 
 ## Status
 
-EmbedFlow v0.5.0 is an alpha release for research and early real-world
+EmbedFlow v0.6.0 is a pre-1.0 release for research and early real-world
 testing.
 
 - T2-v1 reports an empirical finite-tail diagnostic.

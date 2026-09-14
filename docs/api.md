@@ -48,6 +48,11 @@ The response includes the result list and migration fields such as:
 request. A partial response scores the available target vectors; it can differ
 from the fully warm ranking.
 
+The advisory migration planner is exposed through the Python API and the
+`embedflow plan` CLI. It is intentionally not a synchronous FastAPI endpoint:
+probe analysis may load models and perform bounded candidate work, so operators
+should generate a plan artifact out of band and publish/read it as needed.
+
 `/status` includes safe backend metadata. For pgvector this names the
 schema/table and vector contract; for Pinecone it names the host/index,
 namespace, dimension, metric, and safe vector counts. Neither backend returns

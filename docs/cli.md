@@ -9,12 +9,22 @@ list. The commands below are the main public entry points.
 embedflow init --config ./embedflow.yaml
 embedflow analyze --config ./embedflow.yaml --output-dir ./analysis
 embedflow evaluate --config ./experiment.yaml --output-dir ./results
+embedflow plan --config ./embedflow.yaml --queries ./probe_queries.jsonl
 ```
 
 `analyze` is the no-target-index workflow. It uses probe queries and frozen
 T2-v1 logic. `evaluate` is the labelled workflow; it computes source quality,
 native target quality, target-within-source-candidates quality, candidate gap,
 containment, and migration depth when the required inputs are available.
+
+`plan` is the advisory migration planner. It runs source preflight and registry
+matching, optionally samples a JSONL probe set, and reports a candidate-depth
+recommendation, cache/economics projections, warnings, and staged rollout
+guidance. Use `--format json` (or `yaml`) for a structured artifact. A plan
+with no probes reports `T2-v1: NOT_RUN`; `SAFE` is a finite-tail diagnostic,
+not a qrels-based retrieval-quality guarantee. A `DEFER`/`EXPAND_PROBE` result
+is still a successful analytical command and exits zero; invalid configuration
+or failed preflight exits nonzero.
 
 ## Serving and operations
 

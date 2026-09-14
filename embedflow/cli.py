@@ -7,6 +7,7 @@ import os
 import platform
 import random
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,7 @@ from .config import (
 from .migration.compatibility import run_probe, save_probe
 from .migration.state import DocumentStore
 from .models import HashEmbeddingModel, load_embedding_model
+from .planner import MigrationPlanner, render_plan
 from .registry import (
     MATCH_EXACT,
     load_benchmark_profiles,
@@ -43,6 +45,26 @@ from .runtime import build_faiss_from_documents, load_documents, open_engine
 
 
 def _json(value: Any) -> None: print(json.dumps(value, indent=2, ensure_ascii=False, default=float))
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Replace a text artifact atomically in its destination directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: str | None = None
+    try:
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
 
 
 def _normalize_device(value: str | None) -> str | None:
@@ -606,6 +628,53 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_plan(args: argparse.Namespace) -> int:
+    """Generate a structured, advisory migration plan.
+
+    Planning uses an isolated temporary target-cache/state directory and never
+    routes traffic or writes to the configured source index. Progress is sent
+    to stderr so JSON/YAML stdout remains machine-readable.
+    """
+    planner = MigrationPlanner(args.config, device=_normalize_device(args.device), demo=args.demo,
+                               model_root=args.model_root)
+    progress = None if args.quiet or args.format != "text" else lambda message: print(message, file=sys.stderr)
+    result = planner.plan(
+        probe_queries=args.queries,
+        max_probes=args.max_probes,
+        seed=args.seed,
+        k_grid=args.k_grid,
+        max_candidates=args.max_candidates,
+        max_target_encodes=args.max_target_encodes,
+        profile=args.profile,
+        gpu_hourly_cost=args.gpu_hourly_cost,
+        target_docs_per_second=args.target_docs_per_second,
+        queries_per_second=args.queries_per_second,
+        daily_queries=args.daily_queries,
+        cache_hit_rate=args.cache_hit_rate,
+        latency_budget_ms=args.latency_budget_ms,
+        access_trace=args.access_trace,
+        corpus_name=args.corpus_name,
+        corpus_fingerprint=args.corpus_fingerprint,
+        progress=progress,
+    )
+    if args.format == "json":
+        rendered = result.to_json()
+    elif args.format == "yaml":
+        rendered = result.to_yaml()
+    else:
+        rendered = render_plan(result)
+    if args.output:
+        destination = Path(args.output).expanduser()
+        _atomic_write_text(destination, rendered)
+        if not args.quiet:
+            print(f"wrote migration plan to {destination}", file=sys.stderr)
+    if not args.output or not args.quiet:
+        print(rendered, end="" if rendered.endswith("\n") else "\n")
+    # A DEFER/EXPAND result is a valid analytical outcome; only structural
+    # configuration/backend failures raise and become a non-zero CLI exit.
+    return 0
+
+
 def cmd_evaluate(args: argparse.Namespace) -> int:
     """Run Mode A evaluation with qrels and native target evidence."""
     cfg = load_config(args.config)
@@ -882,7 +951,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             checks.append({"name": "target_fingerprint", "ok": True, "detail": config.target.fingerprint[:16]})
         except Exception as exc:
             checks.append({"name": "config", "ok": False, "detail": str(exc)})
-    optional_checks = {"faiss", "qdrant_client", "fastapi", "torch", "pytorch", "psycopg", "pinecone", "pymilvus", "weaviate"}
+    # The display label for the ``weaviate`` import is ``weaviate_client``
+    # (``weaviate-client`` is the distribution name).  Keep both spellings
+    # optional so a base install does not fail ``doctor`` merely because an
+    # optional backend is absent.
+    optional_checks = {"faiss", "qdrant_client", "fastapi", "torch", "pytorch", "psycopg", "pinecone", "pymilvus", "weaviate", "weaviate_client"}
     failed = [check for check in checks if not check["ok"] and check["name"] not in optional_checks]
     if args.json:
         _json({"checks": checks, "status": "FAIL" if failed else "PASS"})
@@ -1425,6 +1498,31 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--output")
     analyze.add_argument("--output-dir")
     analyze.set_defaults(func=cmd_analyze)
+    plan_cmd = sub.add_parser("plan", help="build an advisory migration plan from source-index evidence")
+    plan_cmd.add_argument("--config", required=True, help="EmbedFlow YAML configuration")
+    plan_cmd.add_argument("--queries", help="JSONL probe queries; omit to run preflight/evidence/economics only")
+    plan_cmd.add_argument("--max-probes", type=int, help="maximum deterministic probe sample size")
+    plan_cmd.add_argument("--seed", type=int, help="deterministic probe sampling seed")
+    plan_cmd.add_argument("--k-grid", help="comma-separated candidate depths, e.g. 20,50,100,200,500")
+    plan_cmd.add_argument("--max-candidates", type=int, help="hard cap on candidate depth/work")
+    plan_cmd.add_argument("--max-target-encodes", type=int, help="bound unique target document encodes")
+    plan_cmd.add_argument("--format", choices=["text", "json", "yaml"], default="text")
+    plan_cmd.add_argument("--output", help="optional plan artifact path")
+    plan_cmd.add_argument("--profile", action="store_true", help="run a small optional local encode/search profile")
+    plan_cmd.add_argument("--gpu-hourly-cost", type=float)
+    plan_cmd.add_argument("--target-docs-per-second", type=float)
+    plan_cmd.add_argument("--queries-per-second", type=float)
+    plan_cmd.add_argument("--daily-queries", type=float)
+    plan_cmd.add_argument("--cache-hit-rate", type=float)
+    plan_cmd.add_argument("--latency-budget-ms", type=float)
+    plan_cmd.add_argument("--access-trace", help="optional JSONL document access trace")
+    plan_cmd.add_argument("--corpus-name", help="canonical registry corpus identifier, when known")
+    plan_cmd.add_argument("--corpus-fingerprint", help="precomputed corpus fingerprint for exact registry matching")
+    plan_cmd.add_argument("--model-root", help="directory containing staged model snapshots")
+    plan_cmd.add_argument("--device", default=None, help="model device (cpu, cuda, or gpu)")
+    plan_cmd.add_argument("--demo", action="store_true", help="use deterministic demo encoders")
+    plan_cmd.add_argument("--quiet", action="store_true", help="suppress progress and stdout when --output is supplied")
+    plan_cmd.set_defaults(func=cmd_plan)
     evaluate = sub.add_parser("evaluate", help="compute qrels/native-target candidate gaps (Mode A)")
     evaluate.add_argument("--config", required=True)
     evaluate.add_argument("--queries")

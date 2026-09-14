@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.6.0 — Migration planner
+
+- Added an advisory `embedflow plan` command and Python API that combine
+  source-index preflight, registry evidence, representative probes, frozen
+  T2-v1 diagnostics, candidate-depth selection, cache planning, economics, and
+  staged rollout guidance without routing traffic or mutating the source.
+- Added structured JSON/YAML plan artifacts with explicit warnings and
+  measured/user-supplied/modeled/unknown provenance.
+
 ## v0.5.0 — Weaviate backend
 
 - Added a read-only Weaviate v4 backend for existing externally-vectorized
