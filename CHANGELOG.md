@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.8.0 — Traffic-aware target-vector prewarming
+
+- Added bounded `prewarm plan`, `prewarm run`, and `prewarm status` workflows
+  that select uncached target documents by observed Shadow Mode candidate
+  occurrences.
+- Added privacy-safe aggregate document popularity telemetry, content/model
+  fingerprint checks, deterministic tie-breaking, hard document/storage/time
+  budgets, atomic plan/run artifacts, and resumable materialization through the
+  existing target cache and worker.
+- Observed candidate-occurrence coverage remains an operational warming signal;
+  it is not retrieval quality or recall evidence.
+
 ## v0.7.0 — Source-authoritative Shadow Mode
 
 - Added bounded, deterministic, source-authoritative Shadow Mode for observing

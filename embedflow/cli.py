@@ -6,8 +6,10 @@ import json
 import os
 import platform
 import random
+import sqlite3
 import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -34,6 +36,7 @@ from .migration.compatibility import run_probe, save_probe
 from .migration.state import DocumentStore
 from .models import HashEmbeddingModel, load_embedding_model
 from .planner import MigrationPlanner, render_plan
+from .prewarm import PrewarmPlanner, PrewarmRunner, load_prewarm_plan, prewarm_status
 from .registry import (
     MATCH_EXACT,
     load_benchmark_profiles,
@@ -1063,10 +1066,43 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def _effective_shadow_candidate_k(cfg: EmbedFlowConfig) -> int:
+    """Resolve the candidate depth used by the serving Shadow runtime.
+
+    A completed compatibility probe is persisted next to ``state_path`` and
+    the runtime uses its ``recommended_k`` when ``shadow.candidate_k`` is not
+    explicitly configured.  Plan/report commands do not open the source
+    index, so they must mirror that read-only resolution or they could select
+    a different telemetry partition and produce an artifact that the runtime
+    refuses to execute.
+    """
+    candidate_k = getattr(cfg.shadow, "candidate_k", None)
+    if candidate_k is None:
+        candidate_k = cfg.migration.candidate_depth
+        if str(candidate_k).lower() == "auto":
+            candidate_k = 50
+        probe_path = Path(cfg.state_path).with_name("probe_result.json")
+        if probe_path.exists():
+            try:
+                probe = json.loads(probe_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError(f"invalid probe result {probe_path}") from exc
+            if not isinstance(probe, Mapping):
+                raise ValueError(f"probe result {probe_path} must contain a JSON object")
+            recommended = probe.get("recommended_k")
+            if recommended is not None:
+                candidate_k = recommended
+    try:
+        parsed = int(candidate_k)
+        if isinstance(candidate_k, bool) or float(candidate_k) != parsed or parsed < 1:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("shadow candidate_k must be a positive integer") from None
+    return parsed
+
+
 def _shadow_fingerprint(cfg: EmbedFlowConfig) -> str:
-    candidate_k = getattr(cfg.shadow, "candidate_k", None) or cfg.migration.candidate_depth
-    if isinstance(candidate_k, str):
-        candidate_k = 50
+    candidate_k = _effective_shadow_candidate_k(cfg)
     index_identity = index_identity_from_config(cfg.index)
     return migration_fingerprint(source_fingerprint=cfg.source.fingerprint,
                                  target_fingerprint=cfg.target.fingerprint,
@@ -1088,12 +1124,25 @@ def _parse_since(value: str | None) -> float | None:
     return amount * multiplier
 
 
+def _parse_budget_seconds(value: str | float | int | None) -> float | None:
+    """Parse a numeric seconds budget or a compact duration such as ``4h``."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    raw = str(value).strip()
+    try:
+        return float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return _parse_since(raw)
+
+
 def cmd_shadow_report(args: argparse.Namespace) -> int:
     """Render persisted Shadow Mode diagnostics without opening models/indexes."""
     cfg = load_config(args.config)
     telemetry_cfg = cfg.shadow.telemetry
     path = telemetry_cfg.path or str(Path(cfg.cache.path) / "shadow.sqlite3")
-    candidate_k = cfg.shadow.candidate_k or (cfg.migration.candidate_depth if cfg.migration.candidate_depth != "auto" else 50)
+    candidate_k = _effective_shadow_candidate_k(cfg)
     telemetry = ShadowTelemetry(path, config_fingerprint=_shadow_fingerprint(cfg),
                                 enabled=telemetry_cfg.enabled, max_records=telemetry_cfg.max_records,
                                 retain_query_records=telemetry_cfg.retain_query_records,
@@ -1102,7 +1151,7 @@ def cmd_shadow_report(args: argparse.Namespace) -> int:
                                 min_target_coverage_for_ranking=telemetry_cfg.min_target_coverage_for_ranking,
                                 source_fingerprint=cfg.source.fingerprint, target_fingerprint=cfg.target.fingerprint,
                                 backend=cfg.index.backend,
-                                index_identity=index_identity_from_config(cfg.index))
+                                index_identity=index_identity_from_config(cfg.index), read_only=True)
     try:
         report = telemetry.report(since_seconds=_parse_since(args.since), config_fingerprint=_shadow_fingerprint(cfg),
                                   candidate_k=int(candidate_k), sample_rate=cfg.shadow.sample_rate)
@@ -1147,6 +1196,283 @@ def cmd_prewarm(args: argparse.Namespace) -> int:
         _json(engine.prewarm(ids, asynchronous=args.async_mode))
     finally: engine.close()
     return 0
+
+
+def _prewarm_target_dimension(cfg: EmbedFlowConfig) -> int:
+    dimension = getattr(cfg.target, "dimension", None)
+    if dimension is None:
+        raise ValueError("prewarm requires target.dimension in the configuration so cache/storage bounds are explicit")
+    try:
+        parsed = int(dimension)
+        if isinstance(dimension, bool) or float(dimension) != parsed or parsed < 1:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("target.dimension must be a positive integer for prewarming") from None
+    return parsed
+
+
+def _prewarm_cache_dimension(cfg: EmbedFlowConfig) -> int:
+    """Choose a safe decode dimension without mutating a cache.
+
+    A generic target model may not expose ``target.dimension`` until it is
+    loaded.  Planning and status are still useful in that case: infer the
+    dimension from an existing matching cache row when possible, otherwise
+    use a harmless placeholder solely for the read-only cache view.  The
+    planner keeps its own target dimension as ``UNKNOWN`` and therefore never
+    turns that placeholder into a storage estimate.
+    """
+    configured = getattr(cfg.target, "dimension", None)
+    if configured is not None:
+        return _prewarm_target_dimension(cfg)
+    cache_path = Path(cfg.cache.path)
+    db_path = cache_path if cache_path.suffix in {".sqlite", ".sqlite3", ".db"} else cache_path / "cache.sqlite3"
+    if db_path.exists():
+        try:
+            connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)
+            try:
+                row = connection.execute(
+                    "SELECT dimension FROM target_vectors WHERE model_fingerprint=? LIMIT 1",
+                    (cfg.target.fingerprint,),
+                ).fetchone()
+            finally:
+                connection.close()
+            if row and row[0] is not None:
+                parsed = int(row[0])
+                if parsed > 0:
+                    return parsed
+        except (OSError, sqlite3.Error, TypeError, ValueError, OverflowError):
+            pass
+    # ``SQLiteVectorCache`` validates dimensions even for a missing read-only
+    # file.  One is only a constructor placeholder; planner economics remain
+    # UNKNOWN because ``cfg.target.dimension`` is still None.
+    return 1
+
+
+def _open_prewarm_telemetry(cfg: EmbedFlowConfig) -> ShadowTelemetry:
+    telemetry_cfg = cfg.shadow.telemetry
+    path = telemetry_cfg.path or str(Path(cfg.cache.path) / "shadow.sqlite3")
+    # This is exactly the same credential-free fingerprint used by the Shadow
+    # runtime and ``shadow report``.  Opening telemetry never connects to the
+    # source index and therefore keeps planning read-only.
+    return ShadowTelemetry(
+        path,
+        config_fingerprint=_shadow_fingerprint(cfg),
+        enabled=bool(telemetry_cfg.enabled),
+        max_records=int(telemetry_cfg.max_records),
+        retain_query_records=bool(telemetry_cfg.retain_query_records),
+        retain_query_text=False,
+        retention_days=telemetry_cfg.retention_days,
+        min_target_coverage_for_ranking=float(telemetry_cfg.min_target_coverage_for_ranking),
+        source_fingerprint=cfg.source.fingerprint,
+        target_fingerprint=cfg.target.fingerprint,
+        backend=cfg.index.backend,
+        index_identity=index_identity_from_config(cfg.index),
+        read_only=True,
+    )
+
+
+def _prewarm_documents_if_local(cfg: EmbedFlowConfig):
+    """Load a local resolver for content-fingerprint checks when available.
+
+    Remote backends already expose their document resolver through
+    ``open_engine`` during a run.  A plan only needs IDs/counts and must not
+    open a source client just to inspect cache state, so a missing local JSONL
+    file is intentionally treated as an unavailable optional resolver.
+    """
+    try:
+        path = Path(cfg.documents.path).expanduser()
+        if path.exists():
+            return DocumentStore(path, cfg.documents.id_field, cfg.documents.text_field)
+    except (FileNotFoundError, ValueError):
+        return None
+    return None
+
+
+def _prewarm_human_plan(plan: Any) -> str:
+    baseline = plan.baseline
+    selection = plan.selection
+    migration = plan.migration
+    cost = plan.cost
+    selected_storage = cost.get("selected_raw_vector_storage", {}).get("value")
+    storage_text = "UNKNOWN" if selected_storage is None else f"{float(selected_storage) / (1024 ** 2):,.2f} MiB"
+    selected_cost = cost.get("selected_cost", {}).get("value")
+    cost_text = "UNKNOWN" if selected_cost is None else f"{float(selected_cost):,.4f} (modeled)"
+    warning_lines = []
+    for warning in plan.warnings:
+        item = warning.to_dict() if hasattr(warning, "to_dict") else dict(warning)
+        warning_lines.append(f"  [{item.get('severity', 'WARN')}] {item.get('code')}: {item.get('message')}\n"
+                             f"      Remediation: {item.get('remediation')}")
+    lines = [
+        "PREWARM PLAN",
+        "=" * 60,
+        "",
+        "Migration",
+        f"  Backend:                 {migration.get('backend') or 'UNKNOWN'}",
+        f"  Candidate K:             {migration.get('candidate_k') or 'UNKNOWN'}",
+        f"  Source fingerprint:      {str(migration.get('source_fingerprint') or 'UNKNOWN')[:16]}",
+        f"  Target fingerprint:      {str(migration.get('target_fingerprint') or 'UNKNOWN')[:16]}",
+        "",
+        "Traffic window",
+        f"  Shadow observations:     {int(plan.window.get('shadow_observations', 0) or 0):,}",
+        f"  Candidate occurrences:   {int(baseline.get('candidate_occurrences', 0) or 0):,}",
+        f"  Unique candidate docs:   {int(baseline.get('unique_candidate_docs', 0) or 0):,}",
+        "",
+        "Current cache",
+        f"  Warm unique docs:        {int(baseline.get('already_cached_docs', 0) or 0):,}",
+        f"  Observed candidate-occurrence coverage: {float(baseline.get('observed_candidate_coverage', 0.0)):.2%}",
+        "",
+        "Selection",
+        f"  Strategy:                {plan.strategy}",
+        f"  Documents selected:      {int(selection.get('documents', 0) or 0):,}",
+        f"  Added observed candidate-occurrence coverage: {float(selection.get('estimated_incremental_candidate_coverage', 0.0)):.2%}",
+        f"  Projected observed candidate-occurrence coverage: {float(selection.get('estimated_total_candidate_coverage', 0.0)):.2%}",
+        f"  Limiting budget:         {selection.get('limiting_budget')}",
+        "",
+        "Estimated work",
+        f"  Target encodes:          {int(selection.get('documents', 0) or 0):,}",
+        f"  Runtime:                 {cost.get('selected_runtime', {}).get('value') if cost.get('selected_runtime', {}).get('value') is not None else 'UNKNOWN'} seconds",
+        f"  Compute cost:            {cost_text}",
+        f"  Raw vector storage:      {storage_text}",
+        "",
+        "Strategy: traffic_hotset",
+    ]
+    if warning_lines:
+        lines += ["", "Warnings"] + warning_lines
+    lines += ["", "Next:", "  Review the plan, then run: embedflow prewarm run --config <config> --plan <plan.json>"]
+    return "\n".join(lines) + "\n"
+
+
+def _prewarm_human_result(result: Mapping[str, Any]) -> str:
+    return "\n".join([
+        "PREWARM RUN",
+        "=" * 60,
+        f"  Status:                  {result.get('status')}",
+        f"  Planned documents:       {int(result.get('planned_documents', 0) or 0):,}",
+        f"  Already warm:             {int(result.get('already_warm', 0) or 0):,}",
+        f"  Encoded:                  {int(result.get('encoded', 0) or 0):,}",
+        f"  Failed:                   {int(result.get('failed', 0) or 0):,}",
+        f"  Remaining:                {int(result.get('remaining', 0) or 0):,}",
+        f"  Observed candidate-occurrence coverage before: {result.get('observed_candidate_coverage_before') if result.get('observed_candidate_coverage_before') is not None else 'UNKNOWN'}",
+        f"  Observed candidate-occurrence coverage after:  {result.get('observed_candidate_coverage_after') if result.get('observed_candidate_coverage_after') is not None else 'UNKNOWN'}",
+        f"  Measured docs/sec:        {result.get('measured_docs_per_second') if result.get('measured_docs_per_second') is not None else 'UNKNOWN'}",
+        "",
+    ])
+
+
+def cmd_prewarm_plan(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    dimension = _prewarm_cache_dimension(cfg)
+    from .cache import SQLiteVectorCache
+
+    telemetry = _open_prewarm_telemetry(cfg)
+    # Planning is an inspection operation.  Use SQLite's read-only view so a
+    # missing cache does not create directories/tables and an older cache is
+    # not migrated merely because an operator asked for a plan.
+    cache = SQLiteVectorCache(cfg.cache.path, cfg.target.fingerprint, dimension, read_only=True)
+    documents = _prewarm_documents_if_local(cfg)
+    try:
+        candidate_k = _effective_shadow_candidate_k(cfg)
+        planner = PrewarmPlanner.from_config(cfg, telemetry, cache, documents=documents,
+                                             candidate_k=int(candidate_k))
+        if not args.quiet and args.format == "text":
+            print("Planning traffic hot-set from Shadow Mode aggregates...", file=sys.stderr)
+        plan = planner.plan(
+            since_seconds=_parse_since(args.since),
+            max_docs=args.max_docs,
+            target_observed_coverage=args.target_observed_coverage,
+            max_storage_gb=args.max_storage_gb,
+            max_runtime_seconds=_parse_budget_seconds(args.max_runtime),
+            docs_per_second=args.docs_per_second,
+            gpu_hourly_cost=args.gpu_hourly_cost,
+            strategy=args.strategy,
+        )
+        if args.format == "json":
+            rendered = plan.to_json() + "\n"
+        elif args.format == "yaml":
+            rendered = plan.to_yaml()
+        else:
+            rendered = _prewarm_human_plan(plan)
+        if args.output:
+            _atomic_write_text(Path(args.output).expanduser(), rendered)
+        if not args.quiet:
+            print(rendered, end="" if rendered.endswith("\n") else "\n")
+        return 0
+    finally:
+        telemetry.close()
+        cache.close()
+        close_documents = getattr(documents, "close", None)
+        if callable(close_documents):
+            close_documents()
+
+
+def cmd_prewarm_run(args: argparse.Namespace) -> int:
+    plan = load_prewarm_plan(args.plan)
+    # Opening the normal engine validates source/target contracts and uses the
+    # existing resolver/cache/materializer abstractions.  No source write API
+    # is called; the plan runner owns only a plan-specific target queue.
+    engine = open_engine(args.config, device=_normalize_device(args.device), demo=args.demo,
+                         start_worker=False, allow_empty_index=False, mode="source")
+    try:
+        runner = PrewarmRunner.from_engine(engine)
+        result = runner.run(plan, max_runtime_seconds=_parse_budget_seconds(args.max_runtime))
+        if args.format == "json":
+            rendered = json.dumps(result, indent=2, ensure_ascii=False, sort_keys=False, default=float) + "\n"
+        elif args.format == "yaml":
+            import yaml
+            rendered = yaml.safe_dump(result, sort_keys=False, allow_unicode=True)
+        else:
+            rendered = _prewarm_human_result(result)
+        if args.output:
+            _atomic_write_text(Path(args.output).expanduser(), rendered)
+        if not args.quiet:
+            print(rendered, end="" if rendered.endswith("\n") else "\n")
+        return 0
+    finally:
+        engine.close()
+
+
+def cmd_prewarm_status(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    dimension = _prewarm_cache_dimension(cfg)
+    from .cache import SQLiteVectorCache
+
+    cache = SQLiteVectorCache(cfg.cache.path, cfg.target.fingerprint, dimension, read_only=True)
+    try:
+        result = prewarm_status(cache, Path(cache.root) / "prewarm")
+        if args.format == "json":
+            rendered = json.dumps(result, indent=2, ensure_ascii=False, sort_keys=False, default=float) + "\n"
+        elif args.format == "yaml":
+            import yaml
+            rendered = yaml.safe_dump(result, sort_keys=False, allow_unicode=True)
+        else:
+            lines = ["PREWARM STATUS", "=" * 60,
+                     f"  Cache vectors:           {result['cache'].get('cached_target_vectors', 0):,}",
+                     f"  State directory:         {result.get('state_dir')}",
+                     f"  Recorded runs:           {len(result.get('runs', []))}"]
+            runs = result.get("runs", [])
+            if runs:
+                latest = runs[-1]
+                lines.extend([
+                    "",
+                    "Latest run",
+                    f"  Status:                  {latest.get('status', 'UNKNOWN')}",
+                    f"  Selected:                {int(latest.get('planned_documents', latest.get('selected', 0)) or 0):,}",
+                    f"  Already warm:            {int(latest.get('already_warm', 0) or 0):,}",
+                    f"  Encoded:                 {int(latest.get('encoded', 0) or 0):,}",
+                    f"  Failed:                  {int(latest.get('failed', 0) or 0):,}",
+                    f"  Remaining:               {int(latest.get('remaining', 0) or 0):,}",
+                    f"  Observed coverage before: {latest.get('observed_candidate_coverage_before', 'UNKNOWN')}",
+                    f"  Observed coverage after:  {latest.get('observed_candidate_coverage_after', 'UNKNOWN')}",
+                ])
+            lines.append("")
+            rendered = "\n".join(lines)
+        if args.output:
+            _atomic_write_text(Path(args.output).expanduser(), rendered)
+        if not args.quiet:
+            print(rendered, end="" if rendered.endswith("\n") else "\n")
+        return 0
+    finally:
+        cache.close()
 
 
 def cmd_export_target(args: argparse.Namespace) -> int:
@@ -1661,11 +1987,58 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--output-dir", default="./results")
     evaluate.set_defaults(func=cmd_evaluate)
     serve = sub.add_parser("serve", help="start the FastAPI service and dashboard"); serve.add_argument("--config", default="embedflow.yaml"); serve.add_argument("--device", default=None, help="override configured model device (cpu, cuda, or gpu)"); serve.add_argument("--demo", action="store_true"); serve.add_argument("--mode", choices=["migration", "normal", "source", "shadow"], help="override runtime.mode for this process"); serve.add_argument("--host", default="127.0.0.1"); serve.add_argument("--port", type=int, default=8000); serve.add_argument("--log-level", default="info"); serve.set_defaults(func=cmd_serve)
-    command_help = {"status": "show migration, cache, queue, and latency status", "search": "search with source retrieval and target reranking", "prewarm": "materialize selected target vectors", "audit-index": "compare ANN results with an exact/reference index"}
-    for name, func in (("status", cmd_status), ("search", cmd_search), ("prewarm", cmd_prewarm), ("audit-index", cmd_audit_index)):
+    command_help = {"status": "show migration, cache, queue, and latency status", "search": "search with source retrieval and target reranking", "audit-index": "compare ANN results with an exact/reference index"}
+    for name, func in (("status", cmd_status), ("search", cmd_search), ("audit-index", cmd_audit_index)):
         sp = sub.add_parser(name, help=command_help[name]); sp.add_argument("--config", default="embedflow.yaml"); sp.add_argument("--device", default=None, help="override configured model device (cpu, cuda, or gpu)"); sp.add_argument("--demo", action="store_true"); sp.add_argument("--mode", choices=["migration", "normal", "source", "shadow"], help="override runtime.mode for this process"); sp.set_defaults(func=func)
     sub.choices["search"].add_argument("query"); sub.choices["search"].add_argument("--top-k", type=int, default=10); sub.choices["search"].add_argument("--request-id")
-    pre = sub.choices["prewarm"]; pre.add_argument("--documents", type=int); pre.add_argument("--fraction", type=float, default=.01); pre.add_argument("--ids"); pre.add_argument("--strategy", choices=["random", "popular", "explicit"], default="random"); pre.add_argument("--seed", type=int, default=42); pre.add_argument("--async", dest="async_mode", action="store_true")
+    # ``prewarm`` keeps its historical direct-ID interface for compatibility
+    # with existing scripts/release checks, and now also exposes the bounded
+    # traffic-aware ``plan``/``run``/``status`` subcommands.
+    pre = sub.add_parser("prewarm", help="traffic-aware target-vector prewarming (or legacy direct materialization)")
+    pre.add_argument("--config", default="embedflow.yaml")
+    pre.add_argument("--device", default=None, help="override configured model device (cpu, cuda, or gpu)")
+    pre.add_argument("--demo", action="store_true")
+    pre.add_argument("--mode", choices=["migration", "normal", "source", "shadow"], help="override runtime.mode for this process")
+    pre.add_argument("--documents", type=int, help="legacy: number of documents to materialize")
+    pre.add_argument("--fraction", type=float, default=.01, help="legacy: random fraction to materialize")
+    pre.add_argument("--ids", help="legacy: comma-separated document IDs")
+    pre.add_argument("--strategy", choices=["random", "popular", "explicit"], default="random", help="legacy selection strategy")
+    pre.add_argument("--seed", type=int, default=42, help="legacy random seed")
+    pre.add_argument("--async", dest="async_mode", action="store_true", help="legacy: enqueue instead of synchronously encoding")
+    pre.set_defaults(func=cmd_prewarm, prewarm_command=None)
+    pre_sub = pre.add_subparsers(dest="prewarm_command")
+    pre_plan = pre_sub.add_parser("plan", help="create a bounded traffic-hotset plan from Shadow telemetry")
+    pre_plan.add_argument("--config", default="embedflow.yaml")
+    pre_plan.add_argument("--since", help="traffic window such as 1h, 24h, or 7d")
+    pre_plan.add_argument("--max-docs", type=int, help="hard cap on selected uncached documents")
+    pre_plan.add_argument("--target-observed-coverage", type=float, help="target fraction of candidate occurrences in this window")
+    pre_plan.add_argument("--max-storage-gb", type=float, help="raw target-vector storage cap")
+    pre_plan.add_argument("--max-runtime", type=_parse_budget_seconds,
+                          help="runtime budget in seconds or a duration such as 4h when throughput is known")
+    pre_plan.add_argument("--docs-per-second", type=float, help="measured/user-supplied target encoding throughput")
+    pre_plan.add_argument("--gpu-hourly-cost", type=float, help="optional user-supplied GPU hourly price for modeled cost")
+    pre_plan.add_argument("--strategy", choices=["traffic_hotset", "traffic-hotset"], default=None)
+    pre_plan.add_argument("--format", choices=["text", "json", "yaml"], default="text")
+    pre_plan.add_argument("--output", help="optional plan artifact path")
+    pre_plan.add_argument("--quiet", action="store_true", help="suppress progress/stdout when writing an artifact")
+    pre_plan.set_defaults(func=cmd_prewarm_plan)
+    pre_run = pre_sub.add_parser("run", help="execute a validated bounded prewarm plan")
+    pre_run.add_argument("--config", default="embedflow.yaml")
+    pre_run.add_argument("--plan", required=True, help="JSON/YAML plan produced by `prewarm plan`")
+    pre_run.add_argument("--device", default=None, help="override configured model device (cpu, cuda, or gpu)")
+    pre_run.add_argument("--demo", action="store_true")
+    pre_run.add_argument("--max-runtime", type=_parse_budget_seconds,
+                         help="optional execution time bound in seconds or a duration such as 4h")
+    pre_run.add_argument("--format", choices=["text", "json", "yaml"], default="text")
+    pre_run.add_argument("--output", help="optional run report path")
+    pre_run.add_argument("--quiet", action="store_true", help="suppress stdout when writing a report")
+    pre_run.set_defaults(func=cmd_prewarm_run)
+    pre_status = pre_sub.add_parser("status", help="show target cache and durable prewarm run state")
+    pre_status.add_argument("--config", default="embedflow.yaml")
+    pre_status.add_argument("--format", choices=["text", "json", "yaml"], default="text")
+    pre_status.add_argument("--output", help="optional status report path")
+    pre_status.add_argument("--quiet", action="store_true", help="suppress stdout when writing a report")
+    pre_status.set_defaults(func=cmd_prewarm_status)
     export = sub.add_parser("export-target", help="explicitly materialize all target vectors and build a target index"); export.add_argument("--config", default="embedflow.yaml"); export.add_argument("--output-index", required=True); export.add_argument("--backend", choices=["faiss", "qdrant"], default="faiss"); export.add_argument("--collection", default="embedflow-target"); export.add_argument("--batch-size", type=int, default=32); export.add_argument("--device", default="cpu"); export.add_argument("--demo", action="store_true"); export.set_defaults(func=cmd_export_target)
     audit = sub.choices["audit-index"]; audit.add_argument("--reference-index"); audit.add_argument("--queries"); audit.add_argument("--k", type=int, default=500); audit.add_argument("--limit", type=int)
     shadow = sub.add_parser("shadow", help="inspect source-authoritative Shadow Mode telemetry")

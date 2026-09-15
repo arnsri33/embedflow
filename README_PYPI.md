@@ -158,6 +158,17 @@ Reports contain operational and ranking-disagreement diagnostics—not qrel-base
 quality guarantees—and recommendations never route canary traffic. See the
 [Shadow Mode guide](https://github.com/arnsri33/embedflow/blob/main/docs/shadow-mode.md).
 
+After collecting Shadow traffic, prioritize uncached target vectors by observed
+candidate popularity:
+
+```bash
+embedflow prewarm plan --config ./embedflow.yaml --since 24h --max-docs 50000 --output prewarm-plan.json
+embedflow prewarm run --config ./embedflow.yaml --plan prewarm-plan.json
+```
+
+Observed candidate-occurrence coverage is an operational warming signal, not
+retrieval quality or recall. See the [prewarming guide](https://github.com/arnsri33/embedflow/blob/main/docs/prewarming.md).
+
 ## Research
 
 For candidate depth `K`, EmbedFlow measures:
@@ -212,7 +223,7 @@ cover the remaining commands and endpoints.
 
 ## Status
 
-EmbedFlow v0.7.0 is a pre-1.0 release for research and early real-world
+EmbedFlow v0.8.0 is a pre-1.0 release for research and early real-world
 testing. T2-v1 is an empirical finite-tail diagnostic, partial rankings can
 differ from fully warm target reranking, and ANN fidelity needs a reference
 comparison to audit.

@@ -11,6 +11,9 @@ embedflow analyze --config ./embedflow.yaml --output-dir ./analysis
 embedflow evaluate --config ./experiment.yaml --output-dir ./results
 embedflow plan --config ./embedflow.yaml --queries ./probe_queries.jsonl
 embedflow shadow report --config ./embedflow.yaml --since 24h
+embedflow prewarm plan --config ./embedflow.yaml --since 24h --max-docs 50000 --output prewarm-plan.json
+embedflow prewarm run --config ./embedflow.yaml --plan prewarm-plan.json
+embedflow prewarm status --config ./embedflow.yaml
 ```
 
 `analyze` is the no-target-index workflow. It uses probe queries and frozen
@@ -41,7 +44,13 @@ embedflow export-target --config ./embedflow.yaml --output-index ./target.index
 `status` reports cache coverage, hit/miss counters, queue depth, and
 materialization throughput. `audit-index` checks the source index against an
 exact/reference configuration where supported. `prewarm` schedules target
-document work; it does not change source-index results.
+document work; it does not change source-index results. `prewarm plan` ranks
+uncached IDs by privacy-safe Shadow candidate occurrence counts and is always
+bounded by `--max-docs` (or the configured `prewarm.max_docs`). `prewarm run`
+refuses mismatched/tampered fingerprints, skips vectors that became warm, and
+uses the existing durable materializer. Observed candidate-occurrence coverage
+is not retrieval quality or recall. Use `--docs-per-second` and
+`--gpu-hourly-cost` only for explicitly labeled modeled economics.
 
 Use `embedflow serve --mode shadow` to opt into source-authoritative Shadow
 Mode for one process. `embedflow shadow report` reads the bounded telemetry

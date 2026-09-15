@@ -17,6 +17,7 @@ from typing import Any
 from .models import SAFE_FAILURE_CATEGORIES, ShadowObservation
 
 SCHEMA_VERSION = 1
+DOCUMENT_STATS_BUCKET_SECONDS = 60
 _STATUS_COUNTERS = {
     "completed": "shadow_completed_total",
     "partial": "shadow_partial_total",
@@ -46,14 +47,23 @@ def index_identity_from_config(index: Any) -> str:
     keys = (
         "backend", "path", "url", "uri", "host", "index_name", "namespace",
         "database", "collection", "table", "schema", "http_host", "http_port",
-        "grpc_host", "grpc_port", "tenant", "vector_name", "vector_field",
-        "id_field", "text_field", "text_property", "partition_names",
+        "grpc_host", "grpc_port", "secure", "grpc_secure", "tenant", "vector_name",
+        "vector_field", "id_field", "text_field", "text_property", "partition_names",
+        "metric", "nprobe", "hnsw_ef_search", "ivfflat_probes", "search_params",
+        "auto_load",
     )
+    def canonical(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return tuple(sorted((str(key), canonical(child)) for key, child in value.items()))
+        if isinstance(value, set):
+            return tuple(sorted((canonical(child) for child in value), key=repr))
+        if isinstance(value, (list, tuple)):
+            return tuple(canonical(child) for child in value)
+        return value
+
     values: list[str] = []
     for key in keys:
-        value = getattr(index, key, "")
-        if isinstance(value, (list, tuple, set)):
-            value = tuple(str(item) for item in value)
+        value = canonical(getattr(index, key, ""))
         values.append(f"{key}={value!s}")
     return "|".join(values)
 
@@ -107,8 +117,9 @@ class ShadowTelemetry:
                  min_target_coverage_for_ranking: float = 1.0,
                  source_fingerprint: str | None = None, target_fingerprint: str | None = None,
                  backend: str | None = None, index_identity: str | None = None,
-                 retention_days: int | None = None):
+                 retention_days: int | None = None, read_only: bool = False):
         self.path = Path(path) if path else None
+        self.read_only = bool(read_only)
         self.config_fingerprint = str(config_fingerprint)
         self.enabled = bool(enabled)
         if isinstance(max_records, bool) or int(max_records) != max_records or int(max_records) < 1:
@@ -149,11 +160,25 @@ class ShadowTelemetry:
         self._counter_events: list[dict[str, Any]] = []
         self._counter_event_writes = 0
         self._t2_windows: list[dict[str, Any]] = []
+        # Bounded in-process fallback used when SQLite is unavailable.  The
+        # persistent path remains the source of truth for normal deployments;
+        # keeping a cap here prevents a telemetry outage from becoming an
+        # unbounded memory sink.
+        self._document_stats: dict[tuple[int, str, str], dict[str, Any]] = {}
         if self.enabled and self.path is not None:
             self._open()
 
     def _open(self) -> None:
         try:
+            if self.read_only:
+                if self.path is not None and self.path.exists():
+                    self._db = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True,
+                                                check_same_thread=False, timeout=0.5)
+                    self._db.execute("PRAGMA busy_timeout=500")
+                # A missing telemetry file is an empty read-only view, not a
+                # reason for planning to create a database as a side effect.
+                self.available = True
+                return
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._db = sqlite3.connect(str(self.path), check_same_thread=False, timeout=0.5)
             self._db.execute("PRAGMA busy_timeout=500")
@@ -204,6 +229,18 @@ class ShadowTelemetry:
                 status TEXT NOT NULL,
                 query_count INTEGER NOT NULL,
                 diagnostics TEXT)""")
+            self._db.execute("""CREATE TABLE IF NOT EXISTS shadow_document_stats (
+                bucket INTEGER NOT NULL,
+                config_fingerprint TEXT NOT NULL,
+                document_id TEXT NOT NULL,
+                candidate_occurrences INTEGER NOT NULL DEFAULT 0,
+                shadow_queries_seen INTEGER NOT NULL DEFAULT 0,
+                cache_misses INTEGER NOT NULL DEFAULT 0,
+                first_seen REAL NOT NULL,
+                last_seen REAL NOT NULL,
+                PRIMARY KEY(bucket, config_fingerprint, document_id))""")
+            self._db.execute("CREATE INDEX IF NOT EXISTS idx_shadow_document_stats_window "
+                             "ON shadow_document_stats(config_fingerprint,bucket,candidate_occurrences)")
             self._db.execute("INSERT OR REPLACE INTO shadow_meta(key,value) VALUES('schema_version',?)",
                              (str(SCHEMA_VERSION),))
             if self.retention_days is not None:
@@ -212,6 +249,7 @@ class ShadowTelemetry:
                 self._db.execute("DELETE FROM shadow_t2_windows WHERE observed_at < ?", (cutoff,))
                 self._db.execute("DELETE FROM shadow_counters WHERE bucket < ?", (self._bucket(cutoff),))
                 self._db.execute("DELETE FROM shadow_counter_events WHERE observed_at < ?", (cutoff,))
+                self._db.execute("DELETE FROM shadow_document_stats WHERE bucket < ?", (self._bucket(cutoff),))
             # Rehydrate the live all-time snapshot after a process restart.
             # Reports already read the durable event ledger directly, but
             # ``status`` is expected to show persisted counters immediately
@@ -248,7 +286,7 @@ class ShadowTelemetry:
                 self._db = None
 
     def _bucket(self, timestamp: float) -> int:
-        return int(timestamp // 60) * 60
+        return int(timestamp // DOCUMENT_STATS_BUCKET_SECONDS) * DOCUMENT_STATS_BUCKET_SECONDS
 
     def _safe_db(self) -> sqlite3.Connection | None:
         return self._db if self.available and self._db is not None else None
@@ -289,6 +327,8 @@ class ShadowTelemetry:
     def increment(self, name: str, amount: int | float = 1, *, timestamp: float | None = None,
                   config_fingerprint: str | None = None) -> None:
         """Increment an aggregate counter without exposing exceptions."""
+        if self.read_only:
+            return
         try:
             value = float(amount)
             if not math.isfinite(value) or value < 0:
@@ -310,22 +350,277 @@ class ShadowTelemetry:
                     DO UPDATE SET value=value+excluded.value""", (bucket, fp, name, value))
                 db.commit()
         except Exception as exc:
-            self.error = _sanitize(exc)
-            self.available = False
+            self._disable_db(exc)
 
     def record_primary(self, *, eligible: bool = True, timestamp: float | None = None) -> None:
+        if self.read_only:
+            return
         self.increment("primary_requests_total", timestamp=timestamp)
         if eligible:
             self.increment("shadow_eligible_total", timestamp=timestamp)
 
     def record_sampled(self, *, timestamp: float | None = None) -> None:
+        if self.read_only:
+            return
         self.increment("shadow_sampled_total", timestamp=timestamp)
 
+    @staticmethod
+    def _canonical_ids(document_ids: Any) -> list[str]:
+        """Normalize one candidate set without retaining document payloads."""
+        if document_ids is None:
+            return []
+        try:
+            values = list(document_ids)
+        except TypeError:
+            return []
+        # A document appearing twice in a malformed candidate response still
+        # represents one observed document for this query.  This prevents a
+        # duplicate SDK match from artificially inflating hot-set priority.
+        return list(dict.fromkeys(str(value) for value in values))
+
+    def record_candidate_documents(self, document_ids: Any, *, missing_ids: Any = (),
+                                   timestamp: float | None = None,
+                                   config_fingerprint: str | None = None) -> None:
+        """Aggregate privacy-safe candidate popularity for prewarm planning.
+
+        Only canonical IDs and integer counters are stored.  Rows are grouped
+        by one-minute bucket, configuration fingerprint, and document ID; no
+        query text, document text, vectors, or one-row-per-occurrence ledger is
+        created.  The operation is best effort and never raises into serving.
+        """
+        if self.read_only:
+            return
+        ids = self._canonical_ids(document_ids)
+        if not ids:
+            return
+        missing = set(self._canonical_ids(missing_ids))
+        now = float(timestamp if timestamp is not None else time.time())
+        if not math.isfinite(now):
+            now = time.time()
+        fp = str(config_fingerprint if config_fingerprint is not None else self.config_fingerprint)
+        bucket = self._bucket(now)
+        try:
+            with self._lock:
+                db = self._safe_db()
+                if db is not None:
+                    rows = [(bucket, fp, document_id, 1, 1, int(document_id in missing), now, now)
+                            for document_id in ids]
+                    db.executemany("""INSERT INTO shadow_document_stats
+                        (bucket,config_fingerprint,document_id,candidate_occurrences,shadow_queries_seen,
+                         cache_misses,first_seen,last_seen) VALUES(?,?,?,?,?,?,?,?)
+                        ON CONFLICT(bucket,config_fingerprint,document_id) DO UPDATE SET
+                          candidate_occurrences=candidate_occurrences+excluded.candidate_occurrences,
+                          shadow_queries_seen=shadow_queries_seen+excluded.shadow_queries_seen,
+                          cache_misses=cache_misses+excluded.cache_misses,
+                          first_seen=MIN(first_seen,excluded.first_seen),
+                          last_seen=MAX(last_seen,excluded.last_seen)""", rows)
+                    db.commit()
+                    return
+                # Keep only the highest-frequency bounded set in the fallback.
+                for document_id in ids:
+                    key = (bucket, fp, document_id)
+                    row = self._document_stats.setdefault(
+                        key, {"bucket": bucket, "config_fingerprint": fp, "document_id": document_id,
+                              "candidate_occurrences": 0, "shadow_queries_seen": 0, "cache_misses": 0,
+                              "first_seen": now, "last_seen": now})
+                    row["candidate_occurrences"] += 1
+                    row["shadow_queries_seen"] += 1
+                    row["cache_misses"] += int(document_id in missing)
+                    row["first_seen"] = min(float(row["first_seen"]), now)
+                    row["last_seen"] = max(float(row["last_seen"]), now)
+                limit = max(1024, self.max_records * 8)
+                if len(self._document_stats) > limit:
+                    keep = sorted(self._document_stats.items(), key=lambda pair: (
+                        -int(pair[1]["candidate_occurrences"]), str(pair[1]["document_id"])))[:limit]
+                    self._document_stats = dict(keep)
+        except Exception as exc:
+            self._disable_db(exc)
+
+    def record_candidate_misses(self, document_ids: Any, *, timestamp: float | None = None,
+                                config_fingerprint: str | None = None) -> None:
+        """Increment miss counts for a previously aggregated candidate set."""
+        if self.read_only:
+            return
+        ids = self._canonical_ids(document_ids)
+        if not ids:
+            return
+        now = float(timestamp if timestamp is not None else time.time())
+        if not math.isfinite(now):
+            now = time.time()
+        fp = str(config_fingerprint if config_fingerprint is not None else self.config_fingerprint)
+        bucket = self._bucket(now)
+        try:
+            with self._lock:
+                db = self._safe_db()
+                if db is not None:
+                    # Do not create popularity rows here: dispatch records the
+                    # observed candidate set, while this method only adds the
+                    # cache-miss diagnostic when a target lookup completes.
+                    db.executemany("""UPDATE shadow_document_stats SET cache_misses=cache_misses+1,last_seen=MAX(last_seen,?)
+                                      WHERE bucket=? AND config_fingerprint=? AND document_id=?""",
+                                   [(now, bucket, fp, document_id) for document_id in ids])
+                    db.commit()
+                    return
+                for key, row in self._document_stats.items():
+                    if key[0] == bucket and key[1] == fp and key[2] in ids:
+                        row["cache_misses"] += 1
+                        row["last_seen"] = max(float(row["last_seen"]), now)
+        except Exception as exc:
+            self.error = _sanitize(exc)
+            self.available = False
+
+    def document_stats(self, *, start: float | None = None, end: float | None = None,
+                       config_fingerprint: str | None = None) -> list[dict[str, Any]]:
+        """Return aggregated candidate popularity for a bounded time window."""
+        start_value = None if start is None else float(start)
+        end_value = None if end is None else float(end)
+        fp = str(config_fingerprint) if config_fingerprint else None
+        try:
+            with self._lock:
+                db = self._safe_db()
+                if db is not None:
+                    clauses: list[str] = []
+                    values: list[Any] = []
+                    if start_value is not None:
+                        clauses.append("bucket>=?"); values.append(self._bucket(start_value))
+                    if end_value is not None:
+                        clauses.append("bucket<=?"); values.append(self._bucket(end_value))
+                    if fp:
+                        clauses.append("config_fingerprint=?"); values.append(fp)
+                    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+                    rows = db.execute(
+                        "SELECT document_id,config_fingerprint,SUM(candidate_occurrences),"
+                        "SUM(shadow_queries_seen),SUM(cache_misses),MIN(first_seen),MAX(last_seen) "
+                        "FROM shadow_document_stats" + where +
+                        " GROUP BY config_fingerprint,document_id "
+                        "ORDER BY SUM(candidate_occurrences) DESC,document_id ASC", values).fetchall()
+                    # Bucket predicates keep the query bounded, while these
+                    # timestamp guards prevent a document seen only outside a
+                    # requested window from leaking in at a bucket boundary.
+                    # Counts remain bucket aggregates when one document spans
+                    # the boundary; the plan explicitly reports that
+                    # one-minute approximation.
+                    rows = [row for row in rows
+                            if (start_value is None or float(row[6]) >= start_value)
+                            and (end_value is None or float(row[5]) <= end_value)]
+                    return [{"document_id": str(row[0]), "config_fingerprint": str(row[1]),
+                             "candidate_occurrences": _nonnegative_int(row[2]),
+                             "shadow_queries_seen": _nonnegative_int(row[3]),
+                             "cache_misses": _nonnegative_int(row[4]),
+                             "first_seen": float(row[5]), "last_seen": float(row[6])} for row in rows]
+                rows = []
+                for row in self._document_stats.values():
+                    if fp and str(row["config_fingerprint"]) != fp:
+                        continue
+                    if start_value is not None and float(row["last_seen"]) < start_value:
+                        continue
+                    if end_value is not None and float(row["first_seen"]) > end_value:
+                        continue
+                    rows.append(dict(row))
+                grouped: dict[tuple[str, str], dict[str, Any]] = {}
+                for row in rows:
+                    key = (str(row["config_fingerprint"]), str(row["document_id"]))
+                    dest = grouped.setdefault(key, {"document_id": key[1], "config_fingerprint": key[0],
+                                                     "candidate_occurrences": 0, "shadow_queries_seen": 0,
+                                                     "cache_misses": 0, "first_seen": row["first_seen"],
+                                                     "last_seen": row["last_seen"]})
+                    for field in ("candidate_occurrences", "shadow_queries_seen", "cache_misses"):
+                        dest[field] += _nonnegative_int(row[field])
+                    dest["first_seen"] = min(dest["first_seen"], row["first_seen"])
+                    dest["last_seen"] = max(dest["last_seen"], row["last_seen"])
+                return sorted(grouped.values(), key=lambda row: (-row["candidate_occurrences"], row["document_id"]))
+        except Exception as exc:
+            self._disable_db(exc)
+            return []
+
+    def iter_document_stats(self, *, start: float | None = None, end: float | None = None,
+                            config_fingerprint: str | None = None):
+        """Stream aggregate document popularity in deterministic order.
+
+        ``document_stats`` remains convenient for small callers, while this
+        iterator avoids materialising millions of popularity rows in Python
+        during a prewarm plan.  SQLite performs the grouping/order and rows
+        are yielded one at a time.  The bounded in-memory fallback is already
+        capped by ``max_records`` and is sorted before yielding.
+        """
+        start_value = None if start is None else float(start)
+        end_value = None if end is None else float(end)
+        fp = str(config_fingerprint) if config_fingerprint else None
+        cursor = None
+        fallback: list[dict[str, Any]] | None = None
+        fallback_offset = 0
+        try:
+            while True:
+                with self._lock:
+                    db = self._safe_db()
+                    if db is not None:
+                        if cursor is None:
+                            clauses: list[str] = []
+                            values: list[Any] = []
+                            if start_value is not None:
+                                clauses.append("bucket>=?"); values.append(self._bucket(start_value))
+                            if end_value is not None:
+                                clauses.append("bucket<=?"); values.append(self._bucket(end_value))
+                            if fp:
+                                clauses.append("config_fingerprint=?"); values.append(fp)
+                            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+                            cursor = db.execute(
+                                "SELECT document_id,config_fingerprint,SUM(candidate_occurrences),"
+                                "SUM(shadow_queries_seen),SUM(cache_misses),MIN(first_seen),MAX(last_seen) "
+                                "FROM shadow_document_stats" + where +
+                                " GROUP BY config_fingerprint,document_id "
+                                "ORDER BY SUM(candidate_occurrences) DESC,document_id ASC", values)
+                        raw_rows = cursor.fetchmany(512)
+                        if raw_rows:
+                            raw_rows = [row for row in raw_rows
+                                        if (start_value is None or float(row[6]) >= start_value)
+                                        and (end_value is None or float(row[5]) <= end_value)]
+                    else:
+                        if fallback is None:
+                            grouped: dict[tuple[str, str], dict[str, Any]] = {}
+                            for row in self._document_stats.values():
+                                if fp and str(row["config_fingerprint"]) != fp:
+                                    continue
+                                if start_value is not None and float(row["last_seen"]) < start_value:
+                                    continue
+                                if end_value is not None and float(row["first_seen"]) > end_value:
+                                    continue
+                                key = (str(row["config_fingerprint"]), str(row["document_id"]))
+                                dest = grouped.setdefault(key, {"document_id": key[1], "config_fingerprint": key[0],
+                                                                 "candidate_occurrences": 0, "shadow_queries_seen": 0,
+                                                                 "cache_misses": 0, "first_seen": row["first_seen"],
+                                                                 "last_seen": row["last_seen"]})
+                                for field in ("candidate_occurrences", "shadow_queries_seen", "cache_misses"):
+                                    dest[field] += _nonnegative_int(row[field])
+                                dest["first_seen"] = min(dest["first_seen"], row["first_seen"])
+                                dest["last_seen"] = max(dest["last_seen"], row["last_seen"])
+                            fallback = sorted(grouped.values(), key=lambda item: (-item["candidate_occurrences"], item["document_id"]))
+                        raw_rows = fallback[fallback_offset:fallback_offset + 512]
+                        fallback_offset += len(raw_rows)
+                if not raw_rows:
+                    return
+                for row in raw_rows:
+                    if isinstance(row, dict):
+                        yield row
+                    else:
+                        yield {"document_id": str(row[0]), "config_fingerprint": str(row[1]),
+                               "candidate_occurrences": _nonnegative_int(row[2]),
+                               "shadow_queries_seen": _nonnegative_int(row[3]),
+                               "cache_misses": _nonnegative_int(row[4]),
+                               "first_seen": float(row[5]), "last_seen": float(row[6])}
+        except Exception as exc:
+            self.error = _sanitize(exc)
+            return
+
     def record_dropped(self, *, timestamp: float | None = None) -> None:
+        if self.read_only:
+            return
         self.increment("shadow_dropped_total", timestamp=timestamp)
 
     def record_observation(self, observation: ShadowObservation | Mapping[str, Any], *, timestamp: float | None = None) -> None:
         """Persist one completed/partial/failed/timeout observation."""
+        if self.read_only:
+            return
         try:
             data = observation.to_dict() if isinstance(observation, ShadowObservation) else dict(observation)
             status = str(data.get("status", "failed")).lower()
@@ -427,6 +722,8 @@ class ShadowTelemetry:
 
     def record_t2_window(self, status: str, query_count: int, *, diagnostics: str | None = None,
                          timestamp: float | None = None, config_fingerprint: str | None = None) -> None:
+        if self.read_only:
+            return
         status = str(status).upper()
         if status not in {"SAFE", "EXPAND", "UNSAFE_OR_UNCERTAIN", "NOT_RUN"}:
             raise ValueError("T2 window status is invalid")

@@ -50,6 +50,11 @@ class ShadowObservation:
     unique_docs_queued: int = 0
     docs_materialized: int = 0
     docs_failed: int = 0
+    # Candidate IDs are retained only transiently so the telemetry writer can
+    # update aggregate popularity counters. They are never written to the
+    # per-observation table and are omitted from public report rendering.
+    candidate_ids: tuple[str, ...] = ()
+    missing_candidate_ids: tuple[str, ...] = ()
     failure_category: str | None = None
     error: str | None = None
 

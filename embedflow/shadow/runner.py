@@ -135,6 +135,20 @@ class ShadowRunner:
                     self.telemetry.record_dropped(timestamp=timestamp)
                 elif operation == "observation":
                     self.telemetry.record_observation(value, timestamp=timestamp)
+                elif operation == "candidate_documents":
+                    payload = value if isinstance(value, Mapping) else {}
+                    self.telemetry.record_candidate_documents(
+                        payload.get("document_ids", ()),
+                        timestamp=timestamp,
+                        config_fingerprint=payload.get("config_fingerprint"),
+                    )
+                elif operation == "candidate_misses":
+                    payload = value if isinstance(value, Mapping) else {}
+                    self.telemetry.record_candidate_misses(
+                        payload.get("document_ids", ()),
+                        timestamp=timestamp,
+                        config_fingerprint=payload.get("config_fingerprint"),
+                    )
             except BaseException:
                 # Telemetry failures are intentionally swallowed.  The local
                 # counters remain available through ``stats`` and the source
@@ -160,6 +174,13 @@ class ShadowRunner:
             item = (request_id, dict(payload), now)
             try:
                 self._queue.put_nowait(item)
+                candidate_ids = payload.get("source_ids", payload.get("candidate_ids", ()))
+                self._emit_telemetry(
+                    "candidate_documents",
+                    {"document_ids": tuple(str(value) for value in candidate_ids),
+                     "config_fingerprint": self.config_fingerprint},
+                    timestamp=now,
+                )
                 return True
             except queue.Full:
                 self._count("shadow_dropped_total")
@@ -207,6 +228,13 @@ class ShadowRunner:
                    "timed_out": "shadow_timeout_total"}.get(status)
         if counter:
             self._count(counter)
+        missing_ids = getattr(observation, "missing_candidate_ids", ())
+        if missing_ids:
+            self._emit_telemetry(
+                "candidate_misses",
+                {"document_ids": tuple(str(value) for value in missing_ids),
+                 "config_fingerprint": self.config_fingerprint},
+            )
         for name, value in (("target_cache_hits", observation.cache_hits),
                             ("target_cache_misses", observation.cache_misses),
                             ("target_docs_queued", observation.docs_queued),

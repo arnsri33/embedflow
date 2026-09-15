@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +51,37 @@ class PersistentWorkQueue:
                                       (document_id, "pending", now, now)); n += cur.rowcount
             self.db.commit()
         return n
+
+    def requeue_stale(self, ids: Iterable[str]) -> int:
+        """Requeue completed/error rows whose cache entry is no longer valid.
+
+        Prewarm plans validate document content at execution time.  A plan
+        may therefore legitimately select an ID that a previous run marked
+        ``done`` when that document's content later changed.  Reset only
+        terminal rows; leave pending/processing work owned by another runner
+        untouched so concurrent runners retain the queue's existing
+        at-least-once behavior.
+        """
+        normalized = list(dict.fromkeys(str(value) for value in ids))
+        if not normalized:
+            return 0
+        changed = 0
+        # Keep bound-variable use below SQLite's conservative 999-variable
+        # limit; this matters for large but still bounded inline plans.
+        for start in range(0, len(normalized), 900):
+            chunk = normalized[start:start + 900]
+            with self.lock:
+                self._ensure_open()
+                now = time.time()
+                placeholders = ",".join("?" for _ in chunk)
+                cursor = self.db.execute(
+                    f"UPDATE work SET status='pending',attempts=0,error=NULL,updated_at=? "
+                    f"WHERE document_id IN ({placeholders}) AND status IN ('done','error')",
+                    [now, *chunk],
+                )
+                self.db.commit()
+                changed += int(cursor.rowcount)
+        return changed
 
     def claim(self, limit: int) -> list[str]:
         if isinstance(limit, bool) or int(limit) != limit or int(limit) < 1:
@@ -154,12 +185,19 @@ class MaterializationWorker:
                 texts: list[str] = []
                 missing: list[str] = []
                 try:
-                    resolved = self.documents.get(ids)
+                    if isinstance(self.documents, Mapping):
+                        resolved = {document_id: self.documents[document_id]
+                                    for document_id in ids if document_id in self.documents}
+                    else:
+                        resolved = self.documents.get(ids)
                 except Exception:
                     resolved = {}
                     for document_id in ids:
                         try:
-                            value = self.documents.get([document_id]).get(document_id)
+                            if isinstance(self.documents, Mapping):
+                                value = self.documents.get(document_id)
+                            else:
+                                value = self.documents.get([document_id]).get(document_id)
                         except Exception:
                             value = None
                         if value is not None:
@@ -182,7 +220,24 @@ class MaterializationWorker:
                 if not available:
                     continue
                 vectors = self.target_model.encode_documents(texts, batch_size=self.batch_size)
-                self.cache.put(available, np.asarray(vectors, dtype="float32")); self.queue.complete(available)
+                values = np.asarray(vectors, dtype="float32")
+                # ``TargetVectorCache`` is an extension point.  Caches from
+                # older integrations may not yet expose content fingerprints
+                # or the keyword on ``put``; retain that contract while using
+                # content-safe writes whenever the cache supports them.
+                fingerprint_fn = getattr(self.cache, "content_fingerprint", None)
+                if callable(fingerprint_fn):
+                    fingerprints = {document_id: fingerprint_fn(text)
+                                    for document_id, text in zip(available, texts)}
+                    try:
+                        self.cache.put(available, values, content_fingerprints=fingerprints)
+                    except TypeError as exc:
+                        if "content_fingerprint" not in str(exc):
+                            raise
+                        self.cache.put(available, values)
+                else:
+                    self.cache.put(available, values)
+                self.queue.complete(available)
                 self._stats["materialized"] += len(available)
                 callback = getattr(self, "on_materialized", None)
                 if callable(callback):

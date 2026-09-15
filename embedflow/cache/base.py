@@ -8,15 +8,15 @@ import numpy as np
 
 class TargetVectorCache(ABC):
     @abstractmethod
-    def get(self, document_ids: list[str]) -> dict[str, np.ndarray]:
+    def get(self, document_ids: list[str], content_fingerprints: Any = None) -> dict[str, np.ndarray]:
         raise NotImplementedError
 
     @abstractmethod
-    def put(self, document_ids: list[str], vectors: np.ndarray) -> None:
+    def put(self, document_ids: list[str], vectors: np.ndarray, content_fingerprints: Any = None) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def contains(self, document_ids: list[str]) -> set[str]:
+    def contains(self, document_ids: list[str], content_fingerprints: Any = None) -> set[str]:
         raise NotImplementedError
 
     @abstractmethod

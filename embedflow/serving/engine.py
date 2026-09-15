@@ -355,6 +355,58 @@ class MigrationEngine:
         target_order = sorted(scored_ids, key=lambda document_id: (-scores[document_id], positions[document_id]))
         return target_order, scores, _elapsed(started)
 
+    def _cache_content_expectations(self, document_ids: list[str]) -> dict[str, str] | None:
+        """Return current JSONL content fingerprints when available.
+
+        Remote document stores may resolve text lazily and should not incur an
+        extra lookup on the source response path.  In-memory/local stores can
+        cheaply bind cache validity to current content; the materializer still
+        performs the authoritative check for remote stores.
+        """
+        fingerprint = getattr(self.cache, "content_fingerprint", None)
+        # Remote backend document stores expose a lazy Mapping proxy whose
+        # ``__getitem__`` performs one network lookup.  Content binding is
+        # authoritative in the materializer for those stores; do not turn the
+        # primary search path into an N+1 fetch.  Direct in-memory mappings are
+        # safe to fingerprint inline.
+        if type(self.documents) is dict:
+            mapping = self.documents
+        elif isinstance(self.documents, Mapping):
+            # Lazy backend Mapping proxies perform a remote lookup per key;
+            # leave content binding to the materializer for those stores.
+            mapping = None
+        else:
+            candidate_mapping = getattr(self.documents, "documents", None)
+            # A concrete dict is the local JSONL/in-memory case.  Do not
+            # index arbitrary Mapping proxies here for the same N+1 reason.
+            mapping = candidate_mapping if type(candidate_mapping) is dict else None
+        if not isinstance(mapping, Mapping) or not callable(fingerprint):
+            return None
+        return {str(document_id): fingerprint(mapping[document_id])
+                for document_id in document_ids if document_id in mapping}
+
+    def _cache_put(self, document_ids: list[str], vectors: Any,
+                   documents: Mapping[str, Any] | None = None) -> None:
+        """Write target vectors while preserving older cache implementations.
+
+        The built-in SQLite cache binds vectors to document content.  External
+        cache implementations written against the pre-0.8 contract may only
+        accept ``put(ids, vectors)``; keeping this compatibility shim here
+        avoids making the shared migration engine unusable for those adapters.
+        """
+        fingerprint_fn = getattr(self.cache, "content_fingerprint", None)
+        if callable(fingerprint_fn) and documents is not None:
+            fingerprints = {document_id: fingerprint_fn(documents[document_id])
+                            for document_id in document_ids if document_id in documents}
+            if len(fingerprints) == len(document_ids):
+                try:
+                    self.cache.put(document_ids, vectors, content_fingerprints=fingerprints)
+                    return
+                except TypeError as exc:
+                    if "content_fingerprint" not in str(exc):
+                        raise
+        self.cache.put(document_ids, vectors)
+
     def _run_shadow_task(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         """Run the target path after the source response has been returned."""
         if self._shadow_closed:
@@ -367,7 +419,8 @@ class MigrationEngine:
             return {"status": "completed", "source_latency_ms": payload.get("source_latency_ms"),
                     "source_candidate_latency_ms": payload.get("source_candidate_latency_ms"),
                     "target_coverage": 1.0, "target_candidates_available": 0,
-                    "target_candidates_missing": 0}
+                    "target_candidates_missing": 0, "candidate_ids": tuple(),
+                    "missing_candidate_ids": tuple()}
         started = time.perf_counter_ns()
         try:
             target_vector = np.asarray(self.target_model.encode_query(str(payload.get("query", ""))), dtype="float32")
@@ -380,7 +433,8 @@ class MigrationEngine:
             raise ShadowTaskError("TARGET_QUERY_ENCODING_ERROR", "target query encoder returned an invalid vector")
         try:
             if materialize:
-                cached = self.cache.get(candidate_ids)
+                expected = self._cache_content_expectations(candidate_ids)
+                cached = self.cache.get(candidate_ids, content_fingerprints=expected) if expected is not None else self.cache.get(candidate_ids)
             else:
                 peek = getattr(self.cache, "peek", None)
                 if not callable(peek):
@@ -388,7 +442,8 @@ class MigrationEngine:
                     # (and some cache implementations refresh access times),
                     # violating the explicit materialize=false guarantee.
                     raise ShadowTaskError("CACHE_ERROR", "target cache does not support read-only lookup")
-                cached = peek(candidate_ids)
+                expected = self._cache_content_expectations(candidate_ids)
+                cached = peek(candidate_ids, content_fingerprints=expected) if expected is not None else peek(candidate_ids)
         except Exception as exc:
             raise ShadowTaskError("CACHE_ERROR", "target cache lookup failed") from exc
         missing = [document_id for document_id in candidate_ids if document_id not in cached]
@@ -422,6 +477,7 @@ class MigrationEngine:
                 "target_query_encode_latency_ms": target_query_ms, "target_rerank_latency_ms": target_rerank_ms,
                 "cache_hits": len(cached), "cache_misses": len(missing),
                 "target_candidates_available": len(scored_ids), "target_candidates_missing": len(missing),
+                "candidate_ids": tuple(candidate_ids), "missing_candidate_ids": tuple(missing),
                 "target_coverage": coverage, "top1_agreement": top1, "top_k_overlap": overlap,
                 # ``queued`` is the count actually accepted by the
                 # persistent deduplicating queue.  A candidate may be missing
@@ -450,7 +506,11 @@ class MigrationEngine:
         t = time.perf_counter_ns(); target_vector = np.asarray(self.target_model.encode_query(query), dtype="float32"); row["target_query_encode_ms"] = _elapsed(t)
         if target_vector.ndim != 1 or target_vector.shape[0] != int(self.target_model.dimension) or not np.isfinite(target_vector).all():
             raise ValueError("target query encoder returned an invalid vector")
-        t = time.perf_counter_ns(); cached = self.cache.get(candidate_ids); row["cache_lookup_ms"] = _elapsed(t)
+        t = time.perf_counter_ns()
+        expected_content = self._cache_content_expectations(candidate_ids)
+        cached = (self.cache.get(candidate_ids, content_fingerprints=expected_content)
+                  if expected_content is not None else self.cache.get(candidate_ids))
+        row["cache_lookup_ms"] = _elapsed(t)
         missing = [doc_id for doc_id in candidate_ids if doc_id not in cached]
         initial_hits = len(cached)
         sync_ids = missing[:max_sync]
@@ -458,7 +518,8 @@ class MigrationEngine:
             t = time.perf_counter_ns()
             docs = self.documents.get(sync_ids)
             vectors = self.target_model.encode_documents([docs[x] for x in sync_ids], batch_size=self.cfg.migration.background_batch_size)
-            self.cache.put(sync_ids, vectors); cached.update({x: np.asarray(v, dtype="float32") for x, v in zip(sync_ids, vectors)})
+            self._cache_put(sync_ids, vectors, docs)
+            cached.update({x: np.asarray(v, dtype="float32") for x, v in zip(sync_ids, vectors)})
             row["synchronous_target_encode_ms"] = _elapsed(t)
         else: row["synchronous_target_encode_ms"] = 0.0
         async_ids = [doc_id for doc_id in missing if doc_id not in cached]
@@ -510,7 +571,11 @@ class MigrationEngine:
 
     def prewarm(self, document_ids: list[str], asynchronous: bool = False) -> dict[str, Any]:
         self._ensure_open()
-        ids = list(dict.fromkeys(str(x) for x in document_ids)); missing = [x for x in ids if x not in self.cache.contains(ids)]
+        ids = list(dict.fromkeys(str(x) for x in document_ids))
+        expected_content = self._cache_content_expectations(ids)
+        warm = (self.cache.contains(ids, content_fingerprints=expected_content)
+                 if expected_content is not None else self.cache.contains(ids))
+        missing = [x for x in ids if x not in warm]
         if asynchronous:
             queued = self.worker.enqueue(missing); return {"requested": len(ids), "queued": queued, "asynchronous": True}
         if missing:
@@ -519,7 +584,7 @@ class MigrationEngine:
                 chunk = missing[start:start + batch_size]
                 docs = self.documents.get(chunk)
                 vectors = self.target_model.encode_documents([docs[x] for x in chunk], batch_size=batch_size)
-                self.cache.put(chunk, vectors)
+                self._cache_put(chunk, vectors, docs)
         return {"requested": len(ids), "materialized": len(missing), "asynchronous": False}
 
     def status(self) -> dict[str, Any]:

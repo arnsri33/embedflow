@@ -77,6 +77,18 @@ planner:
   corpus_name: null
   corpus_fingerprint: null
 
+# Optional bounded traffic-aware target-cache prewarming defaults. CLI flags
+# override these values for one invocation; there is no implicit full-corpus
+# prewarm operation.
+prewarm:
+  max_docs: 1000
+  strategy: traffic_hotset
+  target_observed_coverage: null
+  max_storage_gb: null
+  max_runtime_seconds: null
+  batch_size: null
+  max_retries: null
+
 # Source-authoritative observation mode.  ``runtime.mode: migration`` (the
 # default) leaves Shadow Mode inactive.  ``mode: shadow`` is an explicit opt-in.
 runtime:

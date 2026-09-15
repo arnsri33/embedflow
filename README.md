@@ -174,6 +174,17 @@ coverage, latency, and ranking-disagreement diagnostics; it does not claim
 retrieval-quality preservation without qrels and never routes canary traffic.
 See [`docs/shadow-mode.md`](https://github.com/arnsri33/embedflow/blob/main/docs/shadow-mode.md).
 
+After collecting Shadow traffic, prioritize uncached target vectors by observed
+candidate popularity:
+
+```bash
+embedflow prewarm plan --config ./embedflow.yaml --since 24h --max-docs 50000 --output prewarm-plan.json
+embedflow prewarm run --config ./embedflow.yaml --plan prewarm-plan.json
+```
+
+Observed candidate-occurrence coverage is an operational warming signal, not
+retrieval quality or recall. See [`docs/prewarming.md`](https://github.com/arnsri33/embedflow/blob/main/docs/prewarming.md).
+
 Search responses expose `COLD`, `PARTIAL`, or `WARM`, cache hits and misses,
 synchronous work, queued work, and stage timings. Once the candidate vectors
 are warm, target scoring over that candidate set is deterministic.
@@ -288,7 +299,7 @@ OpenAPI documentation; see
 
 ## Status
 
-EmbedFlow v0.7.0 is a pre-1.0 release for research and early real-world
+EmbedFlow v0.8.0 is a pre-1.0 release for research and early real-world
 testing.
 
 - T2-v1 reports an empirical finite-tail diagnostic.

@@ -2,8 +2,8 @@ cff-version: 1.2.0
 title: "EmbedFlow: Upgrading Legacy Embeddings Without Full Upfront Re-Embedding"
 message: "If EmbedFlow contributes to your work, please cite this software release."
 type: software
-version: 0.7.0
-date-released: 2026-09-13
+version: 0.8.0
+date-released: 2026-09-15
 repository-code: "https://github.com/arnsri33/embedflow"
 url: "https://github.com/arnsri33/embedflow"
 license: AGPL-3.0-only

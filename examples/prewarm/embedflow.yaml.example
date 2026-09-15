@@ -1,0 +1,24 @@
+# This example is intentionally offline: point `index.path` and
+# `documents.path` at an existing source fixture before running the CLI.
+source:
+  model: embedflow/prewarm-demo-source
+  dimension: 8
+target:
+  model: embedflow/prewarm-demo-target
+  dimension: 8
+index:
+  backend: faiss
+  path: ./source.index
+  ids: ./source.ids
+documents:
+  path: ./documents.jsonl
+cache:
+  path: ./runtime/cache
+shadow:
+  candidate_k: 10
+  telemetry:
+    path: ./runtime/shadow.sqlite3
+prewarm:
+  strategy: traffic_hotset
+  max_docs: 1000
+  batch_size: 32

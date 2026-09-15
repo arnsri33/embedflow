@@ -240,6 +240,24 @@ class PlannerConfig:
 
 
 @dataclass
+class PrewarmConfig:
+    """Bounded defaults for traffic-aware target-cache prewarming.
+
+    A plan is deliberately bounded even when the operator omits CLI budgets;
+    this prevents an accidental command from turning into a full-corpus
+    backfill.  The source index is never written by the prewarm layer.
+    """
+
+    max_docs: int = 1000
+    strategy: str = "traffic_hotset"
+    target_observed_coverage: float | None = None
+    max_storage_gb: float | None = None
+    max_runtime_seconds: float | None = None
+    batch_size: int | None = None
+    max_retries: int | None = None
+
+
+@dataclass
 class RuntimeConfig:
     """Serving mode selection.
 
@@ -308,6 +326,10 @@ class EmbedFlowConfig:
     planner: PlannerConfig = field(default_factory=PlannerConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     shadow: ShadowConfig = field(default_factory=ShadowConfig)
+    # Keep new feature configuration at the end: older callers occasionally
+    # construct EmbedFlowConfig positionally, and inserting a field before the
+    # existing runtime/shadow additions would silently shift those arguments.
+    prewarm: PrewarmConfig = field(default_factory=PrewarmConfig)
 
     def resolve_paths(self, base: Path) -> EmbedFlowConfig:
         """Resolve relative paths against the configuration file directory."""
@@ -632,6 +654,31 @@ class EmbedFlowConfig:
                              ("planner.corpus_fingerprint", planner.corpus_fingerprint)):
             if value is not None and (not isinstance(value, str) or not value.strip() or "\x00" in value):
                 raise ValueError(f"{label} must be null or a non-empty string without NUL bytes")
+        prewarm = self.prewarm
+        prewarm.max_docs = _integer(prewarm.max_docs, "prewarm.max_docs", minimum=0)
+        if not isinstance(prewarm.strategy, str) or prewarm.strategy.strip().lower().replace("-", "_") not in {"traffic_hotset"}:
+            raise ValueError("prewarm.strategy must be traffic_hotset")
+        prewarm.strategy = prewarm.strategy.strip().lower().replace("-", "_")
+        for label, value in (("prewarm.target_observed_coverage", prewarm.target_observed_coverage),
+                             ("prewarm.max_storage_gb", prewarm.max_storage_gb),
+                             ("prewarm.max_runtime_seconds", prewarm.max_runtime_seconds)):
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                raise ValueError(f"{label} must be a finite non-negative number")
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"{label} must be a finite non-negative number") from exc
+            if not math.isfinite(parsed) or parsed < 0 or (label.endswith("coverage") and parsed > 1):
+                if label.endswith("coverage"):
+                    raise ValueError("prewarm.target_observed_coverage must be between 0 and 1")
+                raise ValueError(f"{label} must be a finite non-negative number")
+            setattr(prewarm, label.split(".")[-1], parsed)
+        for label, value in (("prewarm.batch_size", prewarm.batch_size), ("prewarm.max_retries", prewarm.max_retries)):
+            if value is not None:
+                parsed = _integer(value, label, minimum=1)
+                setattr(prewarm, label.split(".")[-1], parsed)
 
 
 def _model(raw: dict[str, Any], fallback: str) -> ModelConfig:
@@ -673,6 +720,11 @@ def from_dict(raw: dict[str, Any], *, validate: bool = True) -> EmbedFlowConfig:
         # generated examples/CLI configs still write ``embedding`` explicitly.
         if "vector_field" not in index_raw:
             index_raw["vector_field"] = None
+    prewarm_raw = raw.get("prewarm", {})
+    if prewarm_raw is None:
+        prewarm_raw = {}
+    if not isinstance(prewarm_raw, Mapping):
+        raise ValueError("prewarm must be a YAML object")
     cfg = EmbedFlowConfig(
         source=source,
         target=target,
@@ -683,6 +735,7 @@ def from_dict(raw: dict[str, Any], *, validate: bool = True) -> EmbedFlowConfig:
         economics=EconomicsConfig(**dict(raw.get("economics", {}))),
         probe=ProbeConfig(**dict(raw.get("probe", {}))),
         planner=PlannerConfig(**_planner_raw(raw.get("planner", {}))),
+        prewarm=PrewarmConfig(**dict(prewarm_raw)),
         runtime=RuntimeConfig(**runtime_raw),
         shadow=ShadowConfig(**shadow_raw),
         telemetry=TelemetryConfig(**dict(raw.get("telemetry", {}))),
@@ -860,6 +913,7 @@ def _apply_environment_overrides(cfg: EmbedFlowConfig) -> None:
         "EMBEDFLOW_PLANNER_ACCESS_TRACE": (cfg.planner, "access_trace"),
         "EMBEDFLOW_PLANNER_CORPUS_NAME": (cfg.planner, "corpus_name"),
         "EMBEDFLOW_PLANNER_CORPUS_FINGERPRINT": (cfg.planner, "corpus_fingerprint"),
+        "EMBEDFLOW_PREWARM_STRATEGY": (cfg.prewarm, "strategy"),
         "EMBEDFLOW_SHADOW_TELEMETRY_PATH": (cfg.shadow.telemetry, "path"),
     }
     for variable, (target, field_name) in paths.items():
@@ -979,6 +1033,33 @@ def _apply_environment_overrides(cfg: EmbedFlowConfig) -> None:
         if value is not None and value.strip():
             try:
                 setattr(cfg.planner, field_name, float(value))
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"{variable} must be a finite number") from exc
+    prewarm_ints = (
+        ("EMBEDFLOW_PREWARM_MAX_DOCS", "max_docs"),
+        ("EMBEDFLOW_PREWARM_BATCH_SIZE", "batch_size"),
+        ("EMBEDFLOW_PREWARM_MAX_RETRIES", "max_retries"),
+    )
+    for variable, field_name in prewarm_ints:
+        value = os.environ.get(variable)
+        if value is not None and value.strip():
+            try:
+                parsed = int(value)
+                if float(value) != parsed:
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"{variable} must be an integer") from exc
+            setattr(cfg.prewarm, field_name, parsed)
+    prewarm_floats = (
+        ("EMBEDFLOW_PREWARM_TARGET_COVERAGE", "target_observed_coverage"),
+        ("EMBEDFLOW_PREWARM_MAX_STORAGE_GB", "max_storage_gb"),
+        ("EMBEDFLOW_PREWARM_MAX_RUNTIME_SECONDS", "max_runtime_seconds"),
+    )
+    for variable, field_name in prewarm_floats:
+        value = os.environ.get(variable)
+        if value is not None and value.strip():
+            try:
+                setattr(cfg.prewarm, field_name, float(value))
             except (TypeError, ValueError, OverflowError) as exc:
                 raise ValueError(f"{variable} must be a finite number") from exc
     partitions = os.environ.get("EMBEDFLOW_MILVUS_PARTITION_NAMES") or os.environ.get("EMBEDFLOW_MILVUS_PARTITIONS")
